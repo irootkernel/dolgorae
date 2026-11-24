@@ -636,6 +636,19 @@ expiry notification wiring changes.
   groups and socket ownership, and require an honest retained-registration
   outcome when retirement remains unproven.
 
+## DF-052: Exercise group receipts across Specialist host refresh
+
+- Owner: Specialist host invocation and group settlement maintainers
+- Finding: the refresh suite covers original keyed delivery and receipt
+  recovery. A combined refresh scenario could also exercise the separate
+  group assignment, merge, and synthesis lookup paths.
+- Reason for deferral: those paths already have coverage for the original
+  authority and retained results. The refresh tests cover quiescence, receipt
+  lineage, and byte preservation at the shared boundary.
+- Revisit condition: change a group lookup path or the refresh quiescence
+  check. Verify each original receipt and confirm that refresh leaves the
+  native store unchanged.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

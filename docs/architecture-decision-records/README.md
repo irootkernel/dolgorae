@@ -3096,7 +3096,9 @@ while keeping `codex app-server` and all checked `public-v1`, `public-v2`,
    optional `--allow-downgrade` down to the route floor) on concrete `HostStore`
    quiescence: exclusive `host.lock`, no `STAGING`/sidecar/`*.pending` files,
    and zero unsettled `attempted = 1` `native_calls` rows (durable open External
-   Engagements and hired Specialists never block refresh).
+   Engagements and hired Specialists never block refresh). Keyed deliveries
+   require the original authoritative receipt or settled refusal. State
+   deliveries require a terminal disposition from the original authority.
 5. **Superseding `v0.1.4` candidate and Gate C/D requalification
    (`TASK-098`)**: preserve `EPIC-022`'s historical `8fb6a3578ae3` /
    `b9d1750e9ec5` records, build a superseding `v0.1.4` H3 artifact after

@@ -534,6 +534,14 @@ impl Setup {
             mode,
         })
     }
+
+    fn matches(&self, expected: &Self, owner: &VerifiedOwner) -> bool {
+        owner.matches_persisted_owner_digest(&self.owner)
+            && self.birth == expected.birth
+            && self.generation == expected.generation
+            && self.caller == expected.caller
+            && self.mode == expected.mode
+    }
 }
 
 /// Constructed only from the authenticated host record or Worker-owned call.
@@ -619,7 +627,7 @@ impl Witness {
                 return Err(refusal());
             }
         }
-        if self.owner != owner.configuration_digest
+        if !owner.matches_persisted_owner_digest(&self.owner)
             || self.generation != crate::host_invocation::preparation_generation(owner)?
             || !crate::trusted_host::opaque(&self.primary, 512)
             || self
@@ -682,6 +690,7 @@ pub(crate) fn initialize(owner: &VerifiedOwner, mode: Mode) -> Result<(), Machin
     }
     let setup = Setup::current(owner, mode)?;
     let _lock = owner.root.lock()?;
+    owner.revalidate()?;
     persistence_ready(owner, false)?;
     if crate::host_invocation::persistence_entry_exists(&owner.root.path.join(DATABASE))? {
         let (db, _) = crate::host_invocation::database_connection(owner, DATABASE)?;
@@ -692,7 +701,7 @@ pub(crate) fn initialize(owner: &VerifiedOwner, mode: Mode) -> Result<(), Machin
                 |r| r.get(0),
             )
             .map_err(|_| refusal())?;
-        if decode::<Setup>(&text, MAX_INPUT)? != setup {
+        if !decode::<Setup>(&text, MAX_INPUT)?.matches(&setup, owner) {
             return Err(refusal());
         }
         return Ok(());
@@ -736,6 +745,7 @@ impl<'a> Store<'a> {
         witness.verify(owner)?;
         let setup = {
             let _lock = owner.root.lock()?;
+            owner.revalidate()?;
             persistence_ready(owner, false)?;
             let (db, _) = crate::host_invocation::database_connection(owner, DATABASE)?;
             let bytes: Vec<u8> = db
@@ -747,7 +757,7 @@ impl<'a> Store<'a> {
                 .map_err(|_| refusal())?;
             decode::<Setup>(&bytes, MAX_INPUT)?
         };
-        if Setup::current(owner, setup.mode.clone())? != setup {
+        if !setup.matches(&Setup::current(owner, setup.mode.clone())?, owner) {
             return Err(refusal());
         }
         let scope = witness.scope(&setup)?;
@@ -798,6 +808,7 @@ impl<'a> Store<'a> {
     ) -> Result<T, MachineError> {
         self.authorize()?;
         let _lock = self.owner.root.lock()?;
+        self.owner.revalidate()?;
         persistence_ready(self.owner, false)?;
         let (mut db, file) = crate::host_invocation::database_connection(self.owner, DATABASE)?;
         let tx = db.transaction().map_err(|_| refusal())?;
@@ -1064,6 +1075,37 @@ impl<'a> Store<'a> {
 pub(crate) mod tests {
     use super::*;
     use crate::trusted_host::{HostRoute, tests::Fixture};
+
+    #[test]
+    fn refresh_retains_legacy_consumer_scope_and_accepts_new_witnesses() {
+        let mut fixture = Fixture::new(HostRoute::Codex);
+        fixture.complete_legacy();
+        let old = fixture.owner();
+        initialize(&old, Mode::NativeOnly {}).unwrap();
+        let original_witness = witness(&old);
+        let store = Store::open(&old, original_witness.clone()).unwrap();
+        let original_scope = store.scope.clone();
+        let path = old.root.path.join(DATABASE);
+        let original_bytes = std::fs::read(&path).unwrap();
+        let replacement = fixture.refreshed_image("0.169.1");
+        fixture
+            .refresh(&fixture.path(), &replacement, false)
+            .unwrap();
+        let current = fixture.owner();
+        initialize(&current, Mode::NativeOnly {}).unwrap();
+        let current_witness = witness(&current);
+        assert_eq!(current_witness.owner, current.configuration_digest);
+        assert_ne!(current_witness.owner, original_witness.owner);
+        assert_eq!(
+            Store::open(&current, original_witness).unwrap().scope,
+            original_scope
+        );
+        assert_eq!(
+            Store::open(&current, current_witness).unwrap().scope,
+            original_scope
+        );
+        assert_eq!(std::fs::read(path).unwrap(), original_bytes);
+    }
     pub(crate) fn witness(owner: &VerifiedOwner) -> Witness {
         Witness {
             owner: owner.configuration_digest.clone(),

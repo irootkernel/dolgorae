@@ -275,8 +275,8 @@ there is no backfill or new public digest domain.
 
 ### Protected host setup and invocation ownership
 
-The private administrative entry point `__trusted-specialist-host` separates
-`owner-config-create`, `namespace-setup` and `host-state-init`, in that order.
+Initial setup through `__trusted-specialist-host` runs `owner-config-create`,
+`namespace-setup` and `host-state-init`, in that order.
 Each step authenticates the current Operator and retains its authorization hold
 through publication. It also verifies the configured Controller carrier and
 canonical workspace. Managed configuration additionally names an existing
@@ -289,9 +289,11 @@ Owner configuration lives outside the workspace in an existing private root.
 It pins the historical route identifier separately from the current executable
 version/hash, workspace, Controller generation/carrier, allowed aggregate scopes,
 the five caller references and budget, and adapter provenance. Its credential
-and isolated native-host journal root remain private. Configuration is immutable:
-repeating creation must match the original canonical bytes. Host state binds its generation
-to that configuration and the existing delegation namespace birth. Normal hook,
+and isolated native-host journal root remain private. Repeating creation must
+match the stored normalized configuration. For caller-scoped owners,
+`owner-executable-refresh` replaces the executable binding and preserves the
+owner identity. Host state binds its generation to the owner and
+the existing delegation namespace birth. Normal hook,
 delivery and lookup paths neither initialize nor repair missing state. A partial
 or mismatched host database requires recovery; initialization never resets it.
 Only a verified complete setup can supply a host launch recipe. Administrative
@@ -1313,7 +1315,7 @@ checksums alone do not establish runtime behavior. The H1 host qualification
 remains the historical design-time record. Its route identifiers retain their
 checked encoding; actual executable versions and checksums remain explicit.
 
-For `EPIC-024` (`TASK-097`, `PLANNED`), across the 4-cell `(OwnerKind x
+Under `EPIC-024` (`TASK-097`), across the 4-cell `(OwnerKind x
 caller_scope)` matrix in `trusted_host`, both caller-scoped variants
 (`External + caller_scope: Some` for external MCP hosts and `Managed +
 caller_scope: Some` for caller-scoped delegated sessions such as Podway) replace
@@ -1342,14 +1344,18 @@ and records. Both `schema_version: 1` and `schema_version: 2` stores accept
 compatible `recorded_adapter_version <= CARGO_PKG_VERSION` within the same
 `adapter_id`, and unchanged `v1` stores (`Codex 0.164.0` / `Claude 2.1.310`)
 remain valid for lookup and recovery against their recorded binary. Online
-`owner-executable-refresh` (requiring live Operator and matching Controller
-descriptors without stopping Dolgorae servers or requiring the overwritten prior
-binary on disk; gated on exclusive `host.lock`, no `STAGING`/sidecar/`*.pending`
-files, and zero unsettled `attempted = 1` `native_calls` rows while durable open
-engagements never block refresh; optional `--allow-downgrade` down to the route
-floor) publishes updated `schema_version: 2` `owner.json` atomically while
-preserving all receipts and K-lookup continuity. Until `TASK-097` completes, the
-`TASK-077` compiled-in caller-scoped pins remain the active source guard.
+`owner-executable-refresh` requires live Operator and matching Controller
+descriptors. Dolgorae servers can stay running, and the previous binary may
+already have been overwritten. Refresh atomically publishes the updated
+`schema_version: 2` `owner.json`.
+The initialized HostStore holds exclusive `host.lock` and refuses refresh if
+`STAGING`/sidecar/`*.pending` files are present. For each `attempted = 1`
+`native_calls` row, a keyed delivery needs the exact authoritative retained
+receipt or resolved refusal. A state change needs a terminal disposition from
+its original durable owner. Durable open engagements and hired Specialists can
+stay open. Use `--allow-downgrade` to authorize a decrease down to the route
+floor. The `TASK-077` compiled-in pins continue to validate historical
+caller-scoped `v1` records and refresh preserves their existing receipt lookup.
 
 New qualified caller-workspace startup/policy, instruction-discovery and
 checked-review admissions, and member/task acceptances depending on those

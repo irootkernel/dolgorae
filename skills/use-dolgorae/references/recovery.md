@@ -30,6 +30,13 @@ Recovery starts with current public evidence and never with direct state edits.
    not promise progress or absence of prior effects. Never weaken an identity,
    revision, digest, or credential fence to make a retry succeed.
 
+For a caller-scoped Specialist host after an executable change, preserve the
+owner and original delivery evidence. An authorized Operator can refresh the
+binding with the matching Controller once all attempted native deliveries have
+settled. A managed owner bound directly to a root Run retains that Run's
+executable. The Dolgorae operator guide covers the private refresh procedure
+under Current host and runtime executable selection.
+
 ## One-shot review inspection and cleanup
 
 Use the reference saved before the original invocation. From a fresh process,

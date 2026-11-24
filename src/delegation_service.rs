@@ -8166,6 +8166,27 @@ pub(crate) fn observe_state_control(
     task: Option<Uuid>,
     expected_body: Option<&Value>,
 ) -> Result<Value, MachineError> {
+    observe_state_control_completion(
+        scope,
+        owner,
+        context,
+        operation,
+        member,
+        task,
+        expected_body,
+    )
+    .map(|(result, _)| result)
+}
+
+pub(crate) fn observe_state_control_completion(
+    scope: &DelegationScope<'_>,
+    owner: SettlementOwner,
+    context: Option<&ManagedCallContext<'_>>,
+    operation: &'static str,
+    member: Option<Uuid>,
+    task: Option<Uuid>,
+    expected_body: Option<&Value>,
+) -> Result<(Value, bool), MachineError> {
     transport_owner(scope, owner, context, operation)?;
     let target = task.or(member).unwrap_or(owner.scope_ref());
     let mut result =
@@ -8188,7 +8209,7 @@ pub(crate) fn observe_state_control(
         result["member"] =
             serde_json::to_value(projected).map_err(|_| retained_source_invalid())?;
         result["operation_ref"] = json!(record.operation_ref);
-        return Ok(result);
+        return Ok((result, record.progress == "terminal"));
     }
     let store = EngagementStore::open_read_only(&EngagementStore::workspace_database_path(
         scope.state_root,
@@ -8231,14 +8252,15 @@ pub(crate) fn observe_state_control(
         }
         Ok(result)
     })();
-    projection.map_err(|error: MachineError| {
+    let result = projection.map_err(|error: MachineError| {
         unresolved_effect(
             &error.code,
             operation,
             record.operation_ref,
             "original state operation observation is unavailable",
         )
-    })
+    })?;
+    Ok((result, record.terminal))
 }
 
 #[allow(clippy::too_many_arguments)]

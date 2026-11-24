@@ -534,25 +534,33 @@ binding material. These commands do not install or launch a native host. Ordinar
 hook/delivery/lookup never complete missing setup. Host installation, configuration
 changes and actual host execution still require their own authorization.
 
-Use Codex CLI `0.164.0`
-(`d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf`) and Claude
-Code `2.1.310`
-(`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`) for
-historical TASK-077 qualification until `EPIC-024` (`TASK-097`) delivers
-caller-scoped (`External` and caller-scoped `Managed`) minimum-version (`Codex >=
-0.169.0`, `Claude >= 2.1.310`) hardened non-executing `verify_executable` setup
-binding and split-digest (`schema_version: 2` with `migrated_from_v1_digest`
-receipt continuity) online `owner-executable-refresh` (requiring no Dolgorae
-server shutdown and not blocked by open durable engagements — gated on exclusive
-`host.lock`, no `STAGING`/sidecar/`*.pending` files, and zero unsettled
-`attempted = 1` `native_calls` rows; optional `--allow-downgrade` down to the
-route floor). Verify the executable hash before use and select an explicit
-absolute path. The [runtime qualification
-owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-separates these executable rules from the historical H1 route identifiers.
-Original accepted bindings retain their executable; missing or changed bytes
-require recovery (or explicit `TASK-097` online `owner-executable-refresh` after
-`RECOVERY_REQUIRED` for caller-scoped host stores) without silent fallback.
+For a new caller-scoped External or Managed owner, supply the attested version,
+SHA-256, and physical absolute executable path. The minimum is Codex `0.169.0`
+or Claude Code `2.1.310` for the selected route. Historical TASK-077 results
+remain tied to the exact Codex `0.164.0` and Claude Code `2.1.310` hashes in the
+[runtime qualification owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification).
+
+After `RECOVERY_REQUIRED` from a caller-scoped executable change, refresh with
+the live Operator and matching Controller descriptors. A previously accepted
+root Run keeps its original executable binding.
+
+```text
+dolgorae __trusted-specialist-host owner-executable-refresh --owner-config PRIVATE_ROOT/owner.json --request PRIVATE_REQUEST --operator-fd FD --controller-fd FD [--allow-downgrade]
+```
+
+The private request is a JSON object with `path`, `version`, and `sha256` for the
+replacement executable. The command verifies it without launching it and can
+run after the old binary has been overwritten. For a lower SemVer version,
+provide `--allow-downgrade`. The route minimum still applies.
+
+Refresh requires an initialized HostStore, exclusive `host.lock`, and a private
+root free of staging files, SQLite sidecars, and `*.pending` files. Reconcile
+unsettled native deliveries before refreshing. For an attempted state change,
+the original durable record must show a terminal outcome. Open engagements can
+keep their hired Specialists, and Dolgorae servers can stay running. Refresh
+atomically replaces `owner.json` and preserves `invocations.sqlite` and its
+existing receipts. Managed owners bound directly to a root Run refuse refresh.
+
 Generic Profile doctor probes,
 start/restart/stop and migration retain tested/unverified compatibility
 admission; new qualified-mechanism admissions require Codex 0.169.0 or newer

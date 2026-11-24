@@ -7,7 +7,9 @@ use crate::delegation_identity::CallerScope;
 use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
 use crate::run::ControllerBinding;
-use crate::workspace::{SystemGitRunner, SystemWorkspacePlatform, WorkspaceService, WorkspaceView};
+use crate::workspace::{
+    RuntimeVersion, SystemGitRunner, SystemWorkspacePlatform, WorkspaceService, WorkspaceView,
+};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -17,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 const MAX_CONFIG: u64 = 131_072;
+const MAX_INTEGER: u64 = 9_007_199_254_740_991;
 pub(crate) const LOCK_NAME: &str = "host.lock";
 
 pub(crate) fn refusal() -> MachineError {
@@ -25,6 +28,16 @@ pub(crate) fn refusal() -> MachineError {
         "protected host state is unavailable or inconsistent",
         false,
         serde_json::json!({"required_action":"restore_state","effect":"none"}),
+    )
+}
+
+fn refresh_required() -> MachineError {
+    MachineError::new(
+        "RECOVERY_REQUIRED",
+        "protected host executable must be refreshed",
+        false,
+        serde_json::json!({"required_action":"restore_state","effect":"none",
+            "reason":"host_executable_refresh_required"}),
     )
 }
 
@@ -122,6 +135,164 @@ struct OwnerRecord {
     canonical_workspace: PathBuf,
     controller: ControllerBinding,
     configuration: OwnerDraft,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerIdentity {
+    workspace_ref: String,
+    canonical_workspace: PathBuf,
+    controller: ControllerBinding,
+    route: HostRoute,
+    owner: OwnerKind,
+    controller_file: PathBuf,
+    native_host_root: PathBuf,
+    allowed_scopes: Vec<AllowedScope>,
+    tools: Vec<String>,
+    caller_scope: CallerScope,
+    adapter_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExecutableMetadata {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+}
+
+impl ExecutableMetadata {
+    pub(crate) fn read(metadata: &fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            len: metadata.len(),
+            mtime_sec: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+        }
+    }
+
+    fn valid(&self) -> bool {
+        self.dev <= MAX_INTEGER
+            && self.ino <= MAX_INTEGER
+            && self.len <= MAX_INTEGER
+            && self.mtime_sec.unsigned_abs() <= MAX_INTEGER
+            && (0..1_000_000_000).contains(&self.mtime_nsec)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutableBinding {
+    executable: HostExecutable,
+    executable_epoch: u64,
+    metadata: ExecutableMetadata,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerRecordV2 {
+    schema_version: u32,
+    owner_identity: OwnerIdentity,
+    owner_identity_digest: String,
+    adapter_version: String,
+    executable_binding: ExecutableBinding,
+    #[serde(deserialize_with = "Option::deserialize")]
+    migrated_from_v1_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredOwner {
+    V1(OwnerRecord),
+    V2(OwnerRecordV2),
+}
+
+impl StoredOwner {
+    fn v2(
+        record: OwnerRecord,
+        executable_binding: ExecutableBinding,
+        lineage: Option<String>,
+    ) -> Result<Self, MachineError> {
+        let draft = record.configuration;
+        let owner_identity = OwnerIdentity {
+            workspace_ref: record.workspace_ref,
+            canonical_workspace: record.canonical_workspace,
+            controller: record.controller,
+            route: draft.route,
+            owner: draft.owner,
+            controller_file: draft.controller_file,
+            native_host_root: draft.native_host_root,
+            allowed_scopes: draft.allowed_scopes,
+            tools: draft.tools,
+            caller_scope: draft.caller_scope.ok_or_else(refusal)?,
+            adapter_id: draft.adapter_id,
+        };
+        if !executable_binding.metadata.valid()
+            || !(1..=MAX_INTEGER).contains(&executable_binding.executable_epoch)
+        {
+            return Err(refusal());
+        }
+        Ok(Self::V2(OwnerRecordV2 {
+            schema_version: 2,
+            owner_identity_digest: digest(&owner_identity)?,
+            owner_identity,
+            adapter_version: draft.adapter_version,
+            executable_binding,
+            migrated_from_v1_digest: lineage,
+        }))
+    }
+
+    fn normalized(&self) -> Result<OwnerRecord, MachineError> {
+        match self {
+            Self::V1(record) if record.schema_version == 1 => Ok(record.clone()),
+            Self::V2(record) if record.schema_version == 2 => {
+                let identity = &record.owner_identity;
+                let binding = &record.executable_binding;
+                if digest(identity)? != record.owner_identity_digest
+                    || !binding.metadata.valid()
+                    || !(1..=MAX_INTEGER).contains(&binding.executable_epoch)
+                    || record
+                        .migrated_from_v1_digest
+                        .as_deref()
+                        .is_some_and(|lineage| {
+                            !is_digest(lineage) || lineage == record.owner_identity_digest
+                        })
+                {
+                    return Err(refusal());
+                }
+                Ok(OwnerRecord {
+                    schema_version: 2,
+                    workspace_ref: identity.workspace_ref.clone(),
+                    canonical_workspace: identity.canonical_workspace.clone(),
+                    controller: identity.controller.clone(),
+                    configuration: OwnerDraft {
+                        route: identity.route,
+                        executable: binding.executable.clone(),
+                        owner: identity.owner.clone(),
+                        controller_generation: identity.controller.identity.generation,
+                        controller_file: identity.controller_file.clone(),
+                        native_host_root: identity.native_host_root.clone(),
+                        allowed_scopes: identity.allowed_scopes.clone(),
+                        tools: identity.tools.clone(),
+                        caller_scope: Some(identity.caller_scope.clone()),
+                        adapter_id: identity.adapter_id.clone(),
+                        adapter_version: record.adapter_version.clone(),
+                    },
+                })
+            }
+            _ => Err(refusal()),
+        }
+    }
+
+    fn configuration_digest(&self) -> Result<String, MachineError> {
+        match self {
+            Self::V1(record) => digest(record),
+            Self::V2(record) => Ok(record.owner_identity_digest.clone()),
+        }
+    }
 }
 
 /// A pinned private directory; every relative open checks descriptor identity.
@@ -292,14 +463,30 @@ impl PrivateDirectory {
     }
 
     pub fn publish(&self, name: &str, bytes: &[u8]) -> Result<(), MachineError> {
+        self.publish_file(name, bytes, false, || Ok(()))
+    }
+
+    fn publish_file(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        replace: bool,
+        before_rename: impl FnOnce() -> Result<(), MachineError>,
+    ) -> Result<(), MachineError> {
         let pending = format!("{name}.pending");
         let mut file = self.create_file(&pending)?;
         file.write_all(bytes).map_err(|_| refusal())?;
         file.sync_all().map_err(|_| refusal())?;
         self.verify()?;
-        DarwinSystem
-            .renameat_exclusive(&self.file, OsStr::new(&pending), OsStr::new(name))
-            .map_err(|_| refusal())?;
+        before_rename()?;
+        let source = OsStr::new(&pending);
+        let destination = OsStr::new(name);
+        if replace {
+            DarwinSystem.renameat_file(&self.file, source, destination)
+        } else {
+            DarwinSystem.renameat_exclusive(&self.file, source, destination)
+        }
+        .map_err(|_| refusal())?;
         self.file.sync_all().map_err(|_| refusal())?;
         self.open_file(&self.path.join(name))?;
         Ok(())
@@ -420,41 +607,36 @@ pub struct VerifiedOwner {
     pub(crate) controller: ControllerBinding,
     pub(crate) configuration: OwnerDraft,
     pub(crate) configuration_digest: String,
+    record: StoredOwner,
 }
 
 fn validate_draft(
     root: &PrivateDirectory,
     view: &WorkspaceView,
     draft: &OwnerDraft,
+    schema_version: u32,
 ) -> Result<(), MachineError> {
     if let Some(caller) = &draft.caller_scope {
         caller.validate().map_err(|_| refusal())?;
-    } else if !matches!(draft.owner, OwnerKind::Managed { .. }) {
+        match schema_version {
+            1 if draft.route.matches_legacy(&draft.executable) => {}
+            2 => draft.route.require_supported(&draft.executable)?,
+            _ => return Err(refusal()),
+        }
+    } else if schema_version != 1 || !matches!(draft.owner, OwnerKind::Managed { .. }) {
         return Err(refusal());
     }
-    let expected = match draft.route {
-        HostRoute::Codex => (
-            "0.164.0",
-            "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf",
-        ),
-        HostRoute::Claude => (
-            "2.1.310",
-            "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd",
-        ),
-    };
     let workspace = view.canonical_path.to_path_buf()?;
     if root.path.starts_with(&workspace)
         || workspace.starts_with(&root.path)
         || !draft.executable.path.is_absolute()
-        || (draft.caller_scope.is_some()
-            && (draft.executable.version != expected.0 || draft.executable.sha256 != expected.1))
-        || !(1..=9_007_199_254_740_991).contains(&draft.controller_generation)
+        || !(1..=MAX_INTEGER).contains(&draft.controller_generation)
         || draft.adapter_id
             != match draft.owner {
                 OwnerKind::External => "dolgorae.external/1",
                 OwnerKind::Managed { .. } => "dolgorae.managed/1",
             }
-        || draft.adapter_version != env!("CARGO_PKG_VERSION")
+        || attested_version(&draft.adapter_version)? > attested_version(env!("CARGO_PKG_VERSION"))?
         || matches!(draft.owner, OwnerKind::Managed { session_ref } if session_ref.get_version_num() != 7 || session_ref.get_variant() != uuid::Variant::RFC4122)
         || draft.tools.is_empty()
         || draft.tools.len() > 32
@@ -573,25 +755,35 @@ pub(crate) fn authenticate_owner(
 
 impl VerifiedOwner {
     pub fn load(home: &DolgoraeHome, path: &Path) -> Result<Self, MachineError> {
+        let root = PrivateDirectory::open(path.parent().ok_or_else(refusal)?)?;
+        let owner = Self::load_record(home, path, root)?;
+        owner.verify_executable_metadata()?;
+        Ok(owner)
+    }
+
+    fn load_record(
+        home: &DolgoraeHome,
+        path: &Path,
+        root: PrivateDirectory,
+    ) -> Result<Self, MachineError> {
         if path.file_name() != Some(OsStr::new("owner.json")) {
             return Err(refusal());
         }
-        let root = PrivateDirectory::open(path.parent().ok_or_else(refusal)?)?;
-        let record: OwnerRecord = root.read(path)?;
+        let persisted: StoredOwner = root.read(path)?;
+        let record = persisted.normalized()?;
         let view = WorkspaceService::new(
             SystemWorkspacePlatform,
             SystemGitRunner,
             home.root().to_path_buf(),
         )
         .discover(Some(&record.canonical_workspace))?;
-        if record.schema_version != 1
-            || record.workspace_ref != view.workspace_id
+        if record.workspace_ref != view.workspace_id
             || record.canonical_workspace != view.canonical_path.to_path_buf()?
             || record.controller.identity.generation != record.configuration.controller_generation
         {
             return Err(refusal());
         }
-        validate_draft(&root, &view, &record.configuration)?;
+        validate_draft(&root, &view, &record.configuration, record.schema_version)?;
         let state_root = home.workspace_root(&view.workspace_id);
         authenticate_owner(
             &state_root,
@@ -600,33 +792,78 @@ impl VerifiedOwner {
             &view.workspace_id,
         )?;
         Ok(Self {
-            configuration_digest: digest(&record)?,
+            configuration_digest: persisted.configuration_digest()?,
             root,
             path: path.to_path_buf(),
             view,
             state_root,
             controller: record.controller,
             configuration: record.configuration,
+            record: persisted,
         })
     }
 
     pub(crate) fn revalidate(&self) -> Result<(), MachineError> {
-        let record: OwnerRecord = self.root.read(&self.path)?;
-        if digest(&record)? != self.configuration_digest
-            || record.configuration != self.configuration
-            || record.controller != self.controller
-            || record.workspace_ref != self.view.workspace_id
-            || record.canonical_workspace != self.view.canonical_path.to_path_buf()?
+        self.revalidate_record()?;
+        self.verify_executable_metadata()
+    }
+
+    fn revalidate_record(&self) -> Result<(), MachineError> {
+        let record: StoredOwner = self.root.read(&self.path)?;
+        if record != self.record {
+            return Err(refusal());
+        }
+        let normalized = record.normalized()?;
+        if normalized.configuration != self.configuration
+            || normalized.controller != self.controller
+            || normalized.workspace_ref != self.view.workspace_id
+            || normalized.canonical_workspace != self.view.canonical_path.to_path_buf()?
+            || record.configuration_digest()? != self.configuration_digest
         {
             return Err(refusal());
         }
-        validate_draft(&self.root, &self.view, &self.configuration)?;
+        validate_draft(
+            &self.root,
+            &self.view,
+            &self.configuration,
+            normalized.schema_version,
+        )?;
         authenticate_owner(
             &self.state_root,
             &self.configuration,
             &self.controller,
             &self.view.workspace_id,
         )
+    }
+
+    pub fn matches_persisted_owner_digest(&self, persisted: &str) -> bool {
+        persisted == self.configuration_digest
+            || matches!(&self.record, StoredOwner::V2(record) if record.migrated_from_v1_digest.as_deref() == Some(persisted))
+    }
+
+    fn verify_executable_metadata(&self) -> Result<(), MachineError> {
+        if let StoredOwner::V2(record) = &self.record {
+            let executable = &record.executable_binding;
+            let observed = crate::host_invocation::inspect_executable(&executable.executable)
+                .map_err(|_| refresh_required())?;
+            if observed != executable.metadata {
+                return Err(refresh_required());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_launch_executable(&self) -> Result<File, MachineError> {
+        let checked = crate::host_invocation::verify_executable(&self.configuration.executable);
+        if let StoredOwner::V2(record) = &self.record {
+            let (file, observed) = checked.map_err(|_| refresh_required())?;
+            if observed != record.executable_binding.metadata {
+                return Err(refresh_required());
+            }
+            Ok(file)
+        } else {
+            checked.map(|(file, _)| file)
+        }
     }
 
     pub fn permit(&self, scope: Option<(&str, &str)>) -> Result<(), MachineError> {
@@ -665,7 +902,6 @@ pub(crate) fn create_owner(
         home.root().to_path_buf(),
     )
     .discover(Some(workspace))?;
-    validate_draft(&root, &view, &draft)?;
     let controller = crate::controller::binding_from_carrier(carrier, draft.controller_generation)
         .map_err(|_| refusal())?;
     authenticate_owner(
@@ -674,6 +910,19 @@ pub(crate) fn create_owner(
         &controller,
         &view.workspace_id,
     )?;
+    let schema_version = if draft.caller_scope.is_some() { 2 } else { 1 };
+    let prepared_executable = if crate::host_invocation::persistence_entry_exists(path)? {
+        None
+    } else {
+        validate_draft(&root, &view, &draft, schema_version)?;
+        if schema_version == 2 {
+            Some(crate::host_invocation::verify_executable(
+                &draft.executable,
+            )?)
+        } else {
+            None
+        }
+    };
     let lock_path = root.path.join(LOCK_NAME);
     if !lock_path.try_exists().map_err(|_| refusal())? {
         if path.try_exists().map_err(|_| refusal())? {
@@ -689,25 +938,124 @@ pub(crate) fn create_owner(
         }
     }
     let _lock = root.lock()?;
-    let record = OwnerRecord {
-        schema_version: 1,
-        workspace_ref: view.workspace_id,
+    let mut record = OwnerRecord {
+        schema_version,
+        workspace_ref: view.workspace_id.clone(),
         canonical_workspace: view.canonical_path.to_path_buf()?,
         controller,
         configuration: draft,
     };
     if path.try_exists().map_err(|_| refusal())? {
-        let old: OwnerRecord = root.read(path)?;
-        return if old == record {
+        let old = VerifiedOwner::load_record(home, path, root)?;
+        let original = old.record.normalized()?;
+        record.schema_version = original.schema_version;
+        return if original == record {
+            if matches!(old.record, StoredOwner::V2(_)) {
+                old.verify_launch_executable()?;
+            }
             Ok(())
         } else {
             Err(conflict())
         };
     }
+    validate_draft(&root, &view, &record.configuration, record.schema_version)?;
+    let record = if record.schema_version == 2 {
+        let executable = record.configuration.executable.clone();
+        let (descriptor, metadata) = prepared_executable.as_ref().ok_or_else(refusal)?;
+        if crate::host_invocation::executable_metadata(&executable, descriptor)? != *metadata {
+            return Err(refusal());
+        }
+        StoredOwner::v2(
+            record,
+            ExecutableBinding {
+                executable,
+                executable_epoch: 1,
+                metadata: metadata.clone(),
+            },
+            None,
+        )?
+    } else {
+        StoredOwner::V1(record)
+    };
     let bytes = canonical(&record)?;
-    root.publish("owner.json", &bytes)?;
+    root.publish_file("owner.json", &bytes, false, || {
+        if let StoredOwner::V2(record) = &record {
+            let binding = &record.executable_binding;
+            let (descriptor, _) = prepared_executable.as_ref().ok_or_else(refusal)?;
+            if crate::host_invocation::executable_metadata(&binding.executable, descriptor)?
+                != binding.metadata
+            {
+                return Err(refusal());
+            }
+        }
+        Ok(())
+    })?;
     root.open_file(path)?;
     root.verify()
+}
+
+fn refresh_executable(
+    home: &DolgoraeHome,
+    path: &Path,
+    executable: HostExecutable,
+    carrier: &CredentialCarrier,
+    allow_downgrade: bool,
+) -> Result<(), MachineError> {
+    let root = PrivateDirectory::open(path.parent().ok_or_else(refusal)?)?;
+    let lock = root.lock()?;
+    let owner = VerifiedOwner::load_record(home, path, root)?;
+    crate::controller::authorize_controller(
+        Uuid::nil(),
+        "trusted_host_setup",
+        &owner.controller,
+        carrier,
+    )?;
+    if owner.configuration.caller_scope.is_none() {
+        return Err(refusal());
+    }
+    owner.configuration.route.require_supported(&executable)?;
+    if !allow_downgrade
+        && attested_version(&executable.version)?
+            < attested_version(&owner.configuration.executable.version)?
+    {
+        return Err(refusal());
+    }
+    crate::host_invocation::with_executable_refresh(owner, lock, |owner| {
+        let (descriptor, metadata) = crate::host_invocation::verify_executable(&executable)?;
+        let mut record = owner.record.normalized()?;
+        let (epoch, lineage) = match &owner.record {
+            StoredOwner::V1(_) => (1, Some(owner.configuration_digest.clone())),
+            StoredOwner::V2(record) => (
+                record
+                    .executable_binding
+                    .executable_epoch
+                    .checked_add(1)
+                    .ok_or_else(refusal)?,
+                record.migrated_from_v1_digest.clone(),
+            ),
+        };
+        record.configuration.adapter_version = env!("CARGO_PKG_VERSION").into();
+        let replacement = StoredOwner::v2(
+            record,
+            ExecutableBinding {
+                executable: executable.clone(),
+                executable_epoch: epoch,
+                metadata: metadata.clone(),
+            },
+            lineage,
+        )?;
+        owner.revalidate_record()?;
+        owner
+            .root
+            .publish_file("owner.json", &canonical(&replacement)?, true, || {
+                let current = crate::host_invocation::executable_metadata(&executable, &descriptor)
+                    .map_err(|_| refresh_required())?;
+                if current != metadata {
+                    return Err(refresh_required());
+                }
+                Ok(())
+            })
+    })
 }
 
 /// Administrative errors expose a bounded code, never credential/input/path text.
@@ -756,9 +1104,17 @@ fn run_admin_at(args: &[OsString], test_home: Option<&DolgoraeHome>) -> Result<(
         .and_then(|value| value.to_str())
         .ok_or_else(refusal)?;
     let mut values = std::collections::BTreeMap::new();
-    let (pairs, remainder) = args[1..].as_chunks::<2>();
-    for pair in pairs {
-        let key = pair[0].to_str().ok_or_else(refusal)?;
+    let mut allow_downgrade = false;
+    let mut options = args[1..].iter();
+    while let Some(option) = options.next() {
+        let key = option.to_str().ok_or_else(refusal)?;
+        if key == "--allow-downgrade" {
+            if operation != "owner-executable-refresh" || allow_downgrade {
+                return Err(refusal());
+            }
+            allow_downgrade = true;
+            continue;
+        }
         if !matches!(
             key,
             "--workspace"
@@ -770,13 +1126,12 @@ fn run_admin_at(args: &[OsString], test_home: Option<&DolgoraeHome>) -> Result<(
                 | "--scope-ref"
                 | "--member-ref"
                 | "--task-ref"
-        ) || values.insert(key, &pair[1]).is_some()
+        ) || values
+            .insert(key, options.next().ok_or_else(refusal)?)
+            .is_some()
         {
             return Err(refusal());
         }
-    }
-    if !remainder.is_empty() {
-        return Err(refusal());
     }
     let get = |key| values.get(key).copied().ok_or_else(refusal);
     let fd = |key| inherited_fd(get(key)?);
@@ -821,6 +1176,17 @@ fn run_admin_at(args: &[OsString], test_home: Option<&DolgoraeHome>) -> Result<(
                 path,
                 draft,
                 &controller,
+            )?;
+        }
+        "owner-executable-refresh" if values.len() == 4 => {
+            let request = Path::new(get("--request")?);
+            let root = PrivateDirectory::open(request.parent().ok_or_else(refusal)?)?;
+            refresh_executable(
+                home,
+                path,
+                root.read(request)?,
+                &controller,
+                allow_downgrade,
             )?;
         }
         "namespace-setup" | "host-state-init" if values.len() == 3 => {
@@ -1011,6 +1377,54 @@ impl HostRoute {
             Self::Claude => "claude-code-2.1.295",
         }
     }
+
+    fn minimum_version(self) -> &'static str {
+        match self {
+            Self::Codex => "0.169.0",
+            Self::Claude => "2.1.310",
+        }
+    }
+
+    fn matches_legacy(self, executable: &HostExecutable) -> bool {
+        let (version, sha256) = self.legacy_pin();
+        executable.version == version && executable.sha256 == sha256
+    }
+
+    fn legacy_pin(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Codex => (
+                "0.164.0",
+                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf",
+            ),
+            Self::Claude => (
+                "2.1.310",
+                "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd",
+            ),
+        }
+    }
+
+    fn require_supported(self, executable: &HostExecutable) -> Result<(), MachineError> {
+        if executable.path.is_absolute()
+            && is_digest(&format!("sha256:{}", executable.sha256))
+            && attested_version(&executable.version)? >= attested_version(self.minimum_version())?
+        {
+            Ok(())
+        } else {
+            Err(refusal())
+        }
+    }
+}
+
+fn attested_version(value: &str) -> Result<RuntimeVersion, MachineError> {
+    let core = value.split(['-', '+']).next().ok_or_else(refusal)?;
+    if !opaque(value, 128)
+        || core
+            .split('.')
+            .any(|part| part.len() > 1 && part.starts_with('0'))
+    {
+        return Err(refusal());
+    }
+    RuntimeVersion::parse(value).ok_or_else(refusal)
 }
 
 #[cfg(test)]
@@ -1019,6 +1433,17 @@ pub(crate) mod tests {
     use crate::domain::ControllerKind;
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    fn executable_fixture(path: PathBuf, version: &str) -> HostExecutable {
+        let bytes = b"#!/bin/sh\nprintf attempted > \"$0.executed\"\nexit 99\n";
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        HostExecutable {
+            path,
+            version: version.to_owned(),
+            sha256: crate::jcs::sha256_hex(bytes),
+        }
+    }
 
     pub(crate) fn administrative(
         args: &[OsString],
@@ -1076,23 +1501,12 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
-            let (version, sha256) = match route {
-                HostRoute::Codex => (
-                    "0.164.0",
-                    "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf",
-                ),
-                HostRoute::Claude => (
-                    "2.1.310",
-                    "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd",
-                ),
-            };
             let draft = OwnerDraft {
                 route,
-                executable: HostExecutable {
-                    path: private.join("native-host"),
-                    version: version.to_owned(),
-                    sha256: sha256.to_owned(),
-                },
+                executable: executable_fixture(
+                    private.join("native-host"),
+                    route.minimum_version(),
+                ),
                 owner: OwnerKind::External,
                 controller_generation: 1,
                 controller_file: controller.clone(),
@@ -1184,23 +1598,10 @@ pub(crate) mod tests {
                 controller: controller.clone(),
                 draft: OwnerDraft {
                     route,
-                    executable: HostExecutable {
-                        path: private.join("not-launched"),
-                        version: match route {
-                            HostRoute::Codex => "0.164.0",
-                            HostRoute::Claude => "2.1.310",
-                        }
-                        .into(),
-                        sha256: match route {
-                            HostRoute::Codex => {
-                                "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf"
-                            }
-                            HostRoute::Claude => {
-                                "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd"
-                            }
-                        }
-                        .into(),
-                    },
+                    executable: executable_fixture(
+                        private.join("not-launched"),
+                        route.minimum_version(),
+                    ),
                     owner: if managed {
                         OwnerKind::Managed {
                             session_ref: owner.scope_ref(),
@@ -1324,6 +1725,60 @@ pub(crate) mod tests {
             self.create().unwrap();
             self.namespace();
             self.initialize().unwrap();
+        }
+
+        pub(crate) fn complete_legacy(&mut self) {
+            let (version, sha256) = self.draft.route.legacy_pin();
+            self.draft.executable.version = version.into();
+            self.draft.executable.sha256 = sha256.into();
+            self.draft.adapter_version = "0.1.3".into();
+            let root = PrivateDirectory::open(&self.private).unwrap();
+            root.create_file(LOCK_NAME).unwrap();
+            let carrier = CredentialCarrier::open_path(&self.controller).unwrap();
+            let record = OwnerRecord {
+                schema_version: 1,
+                workspace_ref: crate::workspace::workspace_id(&self.workspace),
+                canonical_workspace: self.workspace.clone(),
+                controller: crate::controller::binding_from_carrier(&carrier, 1).unwrap(),
+                configuration: self.draft.clone(),
+            };
+            root.publish("owner.json", &canonical(&record).unwrap())
+                .unwrap();
+            self.create().unwrap();
+            self.namespace();
+            self.initialize().unwrap();
+        }
+
+        pub(crate) fn refreshed_image(&self, version: &str) -> HostExecutable {
+            executable_fixture(self.private.join("replacement"), version)
+        }
+
+        pub(crate) fn refresh(
+            &self,
+            path: &Path,
+            executable: &HostExecutable,
+            allow_downgrade: bool,
+        ) -> Result<(), MachineError> {
+            let request = self.private.join("refresh.json");
+            fs::write(&request, canonical(executable)?).unwrap();
+            fs::set_permissions(&request, fs::Permissions::from_mode(0o600)).unwrap();
+            let operator = File::open(&self.operator).unwrap();
+            let controller = File::open(&self.controller).unwrap();
+            let mut args: Vec<OsString> = vec![
+                "owner-executable-refresh".into(),
+                "--owner-config".into(),
+                path.as_os_str().into(),
+                "--request".into(),
+                request.into_os_string(),
+                "--operator-fd".into(),
+                operator.as_raw_fd().to_string().into(),
+                "--controller-fd".into(),
+                controller.as_raw_fd().to_string().into(),
+            ];
+            if allow_downgrade {
+                args.push("--allow-downgrade".into());
+            }
+            run_admin_at(&args, Some(&self.home))
         }
     }
     impl Drop for Fixture {
@@ -1479,10 +1934,10 @@ pub(crate) mod tests {
                         admin.private.join("unused").into_os_string(),
                     ]),
                     _ => {
-                        let mut record: OwnerRecord =
+                        let mut record: serde_json::Value =
                             serde_json::from_slice(&fs::read(admin.path()).unwrap()).unwrap();
-                        record.configuration.allowed_scopes[0].reference =
-                            Some(Uuid::now_v7().to_string());
+                        record["owner_identity"]["allowed_scopes"][0]["reference"] =
+                            serde_json::json!(Uuid::now_v7());
                         fs::write(admin.path(), canonical(&record).unwrap()).unwrap();
                     }
                 }
@@ -1500,13 +1955,9 @@ pub(crate) mod tests {
                 }
             }
             let owner = admin.owner();
-            let mut changed: OwnerRecord = serde_json::from_slice(&original_config).unwrap();
-            changed
-                .configuration
-                .caller_scope
-                .as_mut()
-                .unwrap()
-                .podway_attempt_ref = "changed-after-original-capture".into();
+            let mut changed: serde_json::Value = serde_json::from_slice(&original_config).unwrap();
+            changed["owner_identity"]["caller_scope"]["podway_attempt_ref"] =
+                "changed-after-original-capture".into();
             fs::write(admin.path(), canonical(&changed).unwrap()).unwrap();
             let error = administrative_member_recover(
                 &owner,
@@ -1847,7 +2298,13 @@ pub(crate) mod tests {
     pub(crate) fn managed_fixture(route: HostRoute) -> Fixture {
         configure_managed_fixture(Fixture::new(route))
     }
-    pub(crate) fn configure_managed_fixture(mut f: Fixture) -> Fixture {
+    pub(crate) fn configure_managed_fixture(f: Fixture) -> Fixture {
+        let f = prepared_managed_fixture(f);
+        f.complete();
+        f
+    }
+
+    fn prepared_managed_fixture(mut f: Fixture) -> Fixture {
         fs::remove_file(&f.controller).unwrap();
         crate::controller::create_controller_credential(
             &f.controller,
@@ -1934,7 +2391,6 @@ pub(crate) mod tests {
             kind: "orchestrated_session".into(),
             reference: Some(session_ref.to_string()),
         }];
-        f.complete();
         f
     }
 
@@ -2004,6 +2460,92 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn caller_scoped_setup_and_refresh_use_attestation_on_both_routes() {
+        for (route, recent, below_floor) in [
+            (HostRoute::Codex, "0.170.0-rc.10+installer", "0.169.0-rc.1"),
+            (HostRoute::Claude, "2.1.311+installer", "2.1.310-rc.1"),
+        ] {
+            for managed in [false, true] {
+                let mut f = Fixture::new(route);
+                if managed {
+                    f = prepared_managed_fixture(f);
+                }
+                f.draft.adapter_version = "0.1.3".into();
+                f.draft.executable.version = below_floor.into();
+                assert_eq!(f.create().unwrap_err().code, "RECOVERY_REQUIRED");
+                assert!(!f.path().exists());
+                f.draft.executable.version = recent.into();
+                f.complete();
+                let original = f.owner();
+                assert!(matches!(original.record, StoredOwner::V2(_)));
+                assert_eq!(original.configuration.adapter_version, "0.1.3");
+                assert!(!f.draft.executable.path.with_extension("executed").exists());
+                assert!(f.ready().launch_recipe().is_ok());
+                fs::remove_file(&f.draft.executable.path).unwrap();
+                for drift in [
+                    original.revalidate().unwrap_err(),
+                    VerifiedOwner::load(&f.home, &f.path()).err().unwrap(),
+                ] {
+                    assert_eq!(drift.code, "RECOVERY_REQUIRED");
+                    assert_eq!(drift.details["reason"], "host_executable_refresh_required");
+                }
+                let refused = f.refreshed_image(below_floor);
+                let before = fs::read(f.path()).unwrap();
+                assert!(f.refresh(&f.path(), &refused, true).is_err());
+                assert_eq!(fs::read(f.path()).unwrap(), before);
+                let replacement = f.refreshed_image(route.minimum_version());
+                assert!(f.refresh(&f.path(), &replacement, false).is_err());
+                f.refresh(&f.path(), &replacement, true).unwrap();
+                let new = f.owner();
+                assert_eq!(new.configuration_digest, original.configuration_digest);
+                assert!(original.revalidate().is_err());
+                assert_eq!(new.configuration.adapter_version, env!("CARGO_PKG_VERSION"));
+                assert!(!replacement.path.with_extension("executed").exists());
+            }
+        }
+        for invalid in ["0.01.4", "0.1.4-01", "0.1.4+", "0.1.4.0", "v0.1.4"] {
+            assert!(attested_version(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(
+            attested_version("0.1.4+previous").unwrap(),
+            attested_version("0.1.4+current").unwrap()
+        );
+        let mut f = Fixture::new(HostRoute::Codex);
+        f.draft.adapter_version = "999.0.0".into();
+        assert!(f.create().is_err());
+        f.draft.adapter_version = env!("CARGO_PKG_VERSION").into();
+        f.draft.caller_scope = None;
+        assert!(f.create().is_err());
+        assert!(!f.path().exists());
+    }
+
+    #[test]
+    fn managed_refresh_preserves_the_exact_legacy_connection_and_database() {
+        let mut f = prepared_managed_fixture(Fixture::new(HostRoute::Claude));
+        f.complete_legacy();
+        let old = f.owner();
+        let OwnerKind::Managed { session_ref } = old.configuration.owner else {
+            unreachable!()
+        };
+        crate::managed_specialist::connect(&old).unwrap();
+        let root = crate::run::run_root(&old.state_root, session_ref);
+        let connection = root.join("specialist-owner.json");
+        let retained = fs::read(&connection).unwrap();
+        let database = f.private.join("invocations.sqlite");
+        let original = fs::read(&database).unwrap();
+        fs::remove_file(&f.draft.executable.path).unwrap();
+        let replacement = f.refreshed_image("2.1.311");
+        f.refresh(&f.path(), &replacement, false).unwrap();
+        let (_, refreshed) = crate::managed_specialist::load(&old.state_root, session_ref).unwrap();
+        assert_ne!(refreshed.configuration_digest, old.configuration_digest);
+        assert!(refreshed.matches_persisted_owner_digest(&old.configuration_digest));
+        assert!(!refreshed.matches_persisted_owner_digest(&format!("sha256:{}", "0".repeat(64))));
+        crate::managed_specialist::connect(&refreshed).unwrap();
+        assert_eq!(fs::read(&connection).unwrap(), retained);
+        assert_eq!(fs::read(database).unwrap(), original);
+    }
+
+    #[test]
     fn explicit_setup_stages_resume_without_delivery_initialization() {
         for route in [HostRoute::Codex, HostRoute::Claude] {
             let fixture = Fixture::new(route);
@@ -2029,13 +2571,46 @@ pub(crate) mod tests {
                 store.caller_scope().unwrap().accepted(),
                 fixture.draft.caller_scope.as_ref().unwrap()
             );
-            assert!(store.launch_recipe().is_err()); // No native executable is launched by setup.
+            assert!(store.launch_recipe().is_ok());
+            assert!(
+                !fixture
+                    .draft
+                    .executable
+                    .path
+                    .with_extension("executed")
+                    .exists()
+            );
             drop(store);
             fs::remove_file(&namespace).unwrap();
             // DB-committed/birth-unpublished setup resumes without changing birth.
             assert_eq!(fixture.namespace(), birth);
             assert!(namespace.exists());
         }
+    }
+
+    #[test]
+    fn owner_replace_checks_the_executable_after_staging_before_rename() {
+        let f = Fixture::new(HostRoute::Codex);
+        f.create().unwrap();
+        let owner = f.owner();
+        let _lock = owner.root.lock().unwrap();
+        let old = fs::read(f.path()).unwrap();
+        let new = f.refreshed_image("0.169.1");
+        let (descriptor, pinned) = crate::host_invocation::verify_executable(&new).unwrap();
+        let stage = owner.root.path.join("owner.json.pending");
+        let staged = b"unpublished candidate";
+        let result = owner.root.publish_file("owner.json", staged, true, || {
+            assert_eq!(fs::read(&stage).unwrap(), staged);
+            fs::write(&new.path, b"replacement after hash").unwrap();
+            assert_ne!(
+                crate::host_invocation::executable_metadata(&new, &descriptor)?,
+                pinned
+            );
+            Err(refresh_required())
+        });
+        assert_eq!(result.unwrap_err().code, "RECOVERY_REQUIRED");
+        assert_eq!(fs::read(f.path()).unwrap(), old);
+        assert_eq!(fs::read(stage).unwrap(), staged);
     }
 
     #[test]
@@ -2051,7 +2626,7 @@ pub(crate) mod tests {
             "owner filename"
         );
         let mut missing_scope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        missing_scope["configuration"]["allowed_scopes"][1]
+        missing_scope["owner_identity"]["allowed_scopes"][1]
             .as_object_mut()
             .unwrap()
             .remove("reference");
@@ -2063,9 +2638,9 @@ pub(crate) mod tests {
         fs::write(f.path(), &bytes).unwrap();
         for pointer in [
             "",
-            "/configuration",
-            "/configuration/executable",
-            "/configuration/allowed_scopes/0",
+            "/owner_identity",
+            "/executable_binding/executable",
+            "/owner_identity/allowed_scopes/0",
         ] {
             let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             value
@@ -2090,20 +2665,20 @@ pub(crate) mod tests {
         ] {
             let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             match field {
-                "schema_version" => value[field] = 2.into(),
-                "workspace_ref" => value[field] = "foreign".into(),
-                "controller_generation" => value["configuration"][field] = 2.into(),
-                "caller_scope" => value["configuration"][field]["max_rounds"] = 5.into(),
+                "schema_version" => value[field] = 3.into(),
+                "workspace_ref" => value["owner_identity"][field] = "foreign".into(),
+                "controller_generation" => {
+                    value["owner_identity"]["controller"]["identity"]["generation"] = 2.into()
+                }
+                "caller_scope" => value["owner_identity"][field]["max_rounds"] = 5.into(),
                 _ => unreachable!(),
             }
             fs::write(f.path(), canonical(&value).unwrap()).unwrap();
             assert!(owner.revalidate().is_err(), "changed owner record {field}");
-            if field != "caller_scope" {
-                assert!(
-                    VerifiedOwner::load(&f.home, &f.path()).is_err(),
-                    "owner metadata {field}"
-                );
-            }
+            assert!(
+                VerifiedOwner::load(&f.home, &f.path()).is_err(),
+                "owner metadata {field}"
+            );
             fs::write(f.path(), &bytes).unwrap();
         }
         let other = Fixture::new(HostRoute::Codex);

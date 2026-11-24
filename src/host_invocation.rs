@@ -5,10 +5,13 @@
 //! reconcile an ambiguous K delivery. R is always a new observation, and S can
 //! only reconcile once its durable delivery marker has been written.
 
-use crate::delegation_identity::{LookupNamespace, ProtectedInvocation, TrustedInvocationContext};
+use crate::delegation_identity::{
+    LookupNamespace, OperationReceipt, ProtectedInvocation, TrustedInvocationContext,
+};
 use crate::machine::MachineError;
 use crate::trusted_host::{
-    HostLock, HostRoute, OwnerKind, VerifiedOwner, canonical, conflict, digest, opaque, refusal,
+    ExecutableMetadata, HostExecutable, HostLock, HostRoute, OwnerKind, VerifiedOwner, canonical,
+    conflict, digest, opaque, refusal,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};
@@ -147,6 +150,43 @@ impl Drop for Record {
     }
 }
 
+fn accepted_operation_ref(
+    keyed: &ProtectedInvocation,
+    receipt: &OperationReceipt,
+) -> Result<Uuid, MachineError> {
+    receipt.validate()?;
+    receipt.verify_digest()?;
+    if receipt.namespace != keyed.namespace
+        || keyed
+            .receipt
+            .as_ref()
+            .is_some_and(|original| original != receipt)
+    {
+        return Err(refusal());
+    }
+    Uuid::parse_str(&receipt.operation_ref).map_err(|_| refusal())
+}
+
+fn settled_attempt(
+    keyed: &ProtectedInvocation,
+    lookup: &crate::engagement::IntentLookup,
+) -> Result<bool, MachineError> {
+    use crate::engagement::IntentLookup;
+
+    let operation_ref = match lookup {
+        IntentLookup::Accepted(receipt) if keyed.state != "resolved_not_accepted" => {
+            accepted_operation_ref(keyed, receipt)?
+        }
+        IntentLookup::NotAccepted { operation_ref, .. } if keyed.state != "accepted" => {
+            *operation_ref
+        }
+        _ => return Ok(false),
+    };
+    // A prepared mirror has no product operation to contradict. Once it has
+    // observed one, the authoritative outcome must name that same operation.
+    Ok(keyed.state == "prepared" || keyed.operation_ref == Some(operation_ref))
+}
+
 /// A selected and authenticated native binding; fields cannot be model-built.
 pub struct BoundInvocation {
     owner_digest: String,
@@ -160,7 +200,7 @@ pub struct BoundInvocation {
 impl BoundInvocation {
     pub(crate) fn require_owner(&self, owner: &VerifiedOwner) -> Result<(), MachineError> {
         owner.revalidate()?;
-        if self.owner_digest != owner.configuration_digest
+        if !owner.matches_persisted_owner_digest(&self.owner_digest)
             || self.owner_path != owner.path
             || self.context.host_route != owner.configuration.route.identifier()
             || self.context.tool_binding != self.event.tool
@@ -237,14 +277,20 @@ pub(crate) fn database_connection(
     owner: &VerifiedOwner,
     name: &str,
 ) -> Result<(Connection, File), MachineError> {
+    open_database(owner, name, OpenFlags::SQLITE_OPEN_READ_WRITE)
+}
+
+fn open_database(
+    owner: &VerifiedOwner,
+    name: &str,
+    access: OpenFlags,
+) -> Result<(Connection, File), MachineError> {
     let path = owner.root.path.join(name);
     let file = owner.root.open_file(&path)?;
     require_no_sidecars(owner, name)?;
     let connection = Connection::open_with_flags(
         &path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        access | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| refusal())?;
     let mode: String = connection
@@ -253,9 +299,11 @@ pub(crate) fn database_connection(
     if mode != "delete" {
         return Err(refusal());
     }
-    connection
-        .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
-        .map_err(|_| refusal())?;
+    if access == OpenFlags::SQLITE_OPEN_READ_WRITE {
+        connection
+            .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
+            .map_err(|_| refusal())?;
+    }
     verify_database(owner, &file, name)?;
     Ok((connection, file))
 }
@@ -328,7 +376,7 @@ fn metadata(
         .query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))
         .map_err(|_| refusal())?;
     if version != 1
-        || owner_digest != owner.configuration_digest
+        || !owner.matches_persisted_owner_digest(&owner_digest)
         || recorded_birth != birth.to_string()
         || !(1..=MAX_INTEGER).contains(&generation)
         || count != 1
@@ -352,7 +400,73 @@ pub(crate) fn preparation_generation(owner: &VerifiedOwner) -> Result<u64, Machi
     metadata(owner, &connection, birth)
 }
 
+// The supplied guard covers observation and publication. This opening uses
+// stored owner authority even if the previous executable has been overwritten.
+pub(crate) fn with_executable_refresh<T>(
+    owner: VerifiedOwner,
+    lock: HostLock,
+    publish: impl FnOnce(&VerifiedOwner) -> Result<T, MachineError>,
+) -> Result<T, MachineError> {
+    use std::os::unix::ffi::OsStrExt as _;
+    owner.root.verify()?;
+    for entry in std::fs::read_dir(&owner.root.path).map_err(|_| refusal())? {
+        let name = entry.map_err(|_| refusal())?.file_name();
+        if [b".pending".as_slice(), b"-journal", b"-shm", b"-wal"]
+            .iter()
+            .any(|suffix| name.as_bytes().ends_with(suffix))
+        {
+            return Err(refusal());
+        }
+    }
+    let birth = crate::engagement::require_delegation_namespace(&owner.state_root)?;
+    let (connection, database) = open_database(&owner, DATABASE, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let generation = metadata(&owner, &connection, birth)?;
+    let store = HostStore {
+        owner,
+        connection,
+        database,
+        generation,
+        _lock: lock,
+    };
+    store.require_settled_attempts()?;
+    verify_database(&store.owner, &store.database, DATABASE)?;
+    publish(&store.owner)
+}
+
 impl HostStore {
+    fn require_settled_attempts(&self) -> Result<(), MachineError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT event_digest FROM native_calls WHERE attempted=1")
+            .map_err(|_| refusal())?;
+        let mut rows = statement.query([]).map_err(|_| refusal())?;
+        while let Some(row) = rows.next().map_err(|_| refusal())? {
+            let event: String = row.get(0).map_err(|_| refusal())?;
+            let record = self.read_record(&event)?.ok_or_else(refusal)?;
+            let settled = match record.keyed.as_ref() {
+                Some(keyed) => settled_attempt(
+                    keyed,
+                    &self.lookup_keyed(&self.bound(&record), keyed, &record.request)?,
+                )?,
+                None if method_class(
+                    record.request["operation"].as_str().ok_or_else(refusal)?,
+                )? == MethodClass::State =>
+                {
+                    crate::specialist_facade::external_state_delivery_settled(
+                        &self.owner,
+                        &record.request,
+                    )
+                    .map_err(|_| refusal())?
+                }
+                None => return Err(refusal()),
+            };
+            if !settled {
+                return Err(refusal());
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn open(owner: VerifiedOwner) -> Result<Self, MachineError> {
         let lock = owner.root.lock()?;
         owner.revalidate()?;
@@ -393,7 +507,7 @@ impl HostStore {
     pub fn launch_recipe(&self) -> Result<LaunchRecipe, MachineError> {
         self.verify()?;
         let selected = &self.owner.configuration.executable;
-        let file = verify_executable(selected)?;
+        let file = self.owner.verify_launch_executable()?;
         self.verify()?;
         Ok(LaunchRecipe {
             executable: file,
@@ -807,69 +921,12 @@ impl HostStore {
     ) -> Result<crate::engagement::IntentLookup, MachineError> {
         let mut record = self.selected(binding)?;
         let keyed = record.keyed.as_mut().ok_or_else(refusal)?;
-        let store = crate::engagement::EngagementStore::open_read_only(
-            &crate::engagement::EngagementStore::workspace_database_path(&self.owner.state_root),
-        )?;
-        let lookup = if keyed.namespace.operation_kind == "assign_group" {
-            let proof = binding.trusted_keyed()?;
-            crate::delegation_service::lookup_native_group(
-                &crate::delegation_service::DelegationScope {
-                    view: &self.owner.view,
-                    state_root: &self.owner.state_root,
-                    controller: &self.owner.controller,
-                    trusted_invocation: Some(&proof),
-                },
-                &self.caller_scope()?,
-                &record.request,
-            )?
-        } else if keyed.namespace.operation_kind == "merge_group_results" {
-            let proof = binding.trusted_keyed()?;
-            crate::delegation_service::lookup_native_merge(
-                &crate::delegation_service::DelegationScope {
-                    view: &self.owner.view,
-                    state_root: &self.owner.state_root,
-                    controller: &self.owner.controller,
-                    trusted_invocation: Some(&proof),
-                },
-                &record.request,
-            )?
-        } else if keyed.namespace.operation_kind == "assign_synthesis" {
-            crate::delegation_service::lookup_operation(
-                &crate::delegation_service::DelegationScope {
-                    view: &self.owner.view,
-                    state_root: &self.owner.state_root,
-                    controller: &self.owner.controller,
-                    trusted_invocation: None,
-                },
-                "assign_synthesis",
-                keyed
-                    .namespace
-                    .scope_kind
-                    .as_deref()
-                    .zip(keyed.namespace.scope_ref.as_deref()),
-                &keyed.namespace.idempotency_key,
-            )?;
-            store.intent_lookup_bound(&keyed.namespace, &record.context)?
-        } else {
-            store.intent_lookup_bound(&keyed.namespace, &record.context)?
-        };
+        let lookup = self.lookup_keyed(binding, keyed, &record.request)?;
         match &lookup {
             crate::engagement::IntentLookup::Accepted(receipt) => {
-                receipt.validate()?;
-                receipt.verify_digest()?;
-                if receipt.namespace != keyed.namespace {
-                    return Err(refusal());
-                }
-                if keyed
-                    .receipt
-                    .as_ref()
-                    .is_some_and(|original| original != receipt.as_ref())
-                {
-                    return Err(refusal());
-                }
+                let operation_ref = accepted_operation_ref(keyed, receipt)?;
                 keyed.state = "accepted".to_owned();
-                keyed.operation_ref =
-                    Some(Uuid::parse_str(&receipt.operation_ref).map_err(|_| refusal())?);
+                keyed.operation_ref = Some(operation_ref);
                 keyed.receipt = Some((**receipt).clone());
             }
             crate::engagement::IntentLookup::Unresolved { operation_ref, .. } => {
@@ -901,23 +958,109 @@ impl HostStore {
         self.verify()?;
         Ok(lookup)
     }
+
+    fn lookup_keyed(
+        &self,
+        binding: &BoundInvocation,
+        keyed: &ProtectedInvocation,
+        request: &Value,
+    ) -> Result<crate::engagement::IntentLookup, MachineError> {
+        let store = crate::engagement::EngagementStore::open_read_only(
+            &crate::engagement::EngagementStore::workspace_database_path(&self.owner.state_root),
+        )?;
+        if keyed.namespace.operation_kind == "assign_group" {
+            let proof = binding.trusted_keyed()?;
+            crate::delegation_service::lookup_native_group(
+                &crate::delegation_service::DelegationScope {
+                    view: &self.owner.view,
+                    state_root: &self.owner.state_root,
+                    controller: &self.owner.controller,
+                    trusted_invocation: Some(&proof),
+                },
+                &crate::caller_scope::TrustedCallerScope::from_port(
+                    &crate::trusted_host::ConfiguredCallerPort(&self.owner),
+                )?,
+                request,
+            )
+        } else if keyed.namespace.operation_kind == "merge_group_results" {
+            let proof = binding.trusted_keyed()?;
+            crate::delegation_service::lookup_native_merge(
+                &crate::delegation_service::DelegationScope {
+                    view: &self.owner.view,
+                    state_root: &self.owner.state_root,
+                    controller: &self.owner.controller,
+                    trusted_invocation: Some(&proof),
+                },
+                request,
+            )
+        } else if keyed.namespace.operation_kind == "assign_synthesis" {
+            crate::delegation_service::lookup_operation(
+                &crate::delegation_service::DelegationScope {
+                    view: &self.owner.view,
+                    state_root: &self.owner.state_root,
+                    controller: &self.owner.controller,
+                    trusted_invocation: None,
+                },
+                "assign_synthesis",
+                keyed
+                    .namespace
+                    .scope_kind
+                    .as_deref()
+                    .zip(keyed.namespace.scope_ref.as_deref()),
+                &keyed.namespace.idempotency_key,
+            )?;
+            store.intent_lookup_bound(&keyed.namespace, &keyed.context)
+        } else {
+            store.intent_lookup_bound(&keyed.namespace, &keyed.context)
+        }
+    }
 }
 
-fn verify_executable(selected: &crate::trusted_host::HostExecutable) -> Result<File, MachineError> {
-    use sha2::{Digest as _, Sha256};
+fn executable_descriptor(selected: &HostExecutable) -> Result<File, MachineError> {
     use std::os::unix::fs::OpenOptionsExt as _;
-    let mut file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(&selected.path)
-        .map_err(|_| refusal())?;
-    let before = file.metadata().map_err(|_| refusal())?;
-    if !before.is_file()
-        || before.mode() & 0o111 == 0
+        .map_err(|_| refusal())
+}
+
+fn secure_executable(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_file()
+        && metadata.mode() & 0o111 != 0
+        && metadata.mode() & 0o022 == 0
+        && (metadata.uid() == 0 || metadata.uid() == crate::darwin::DarwinSystem.current_uid())
+}
+
+pub(crate) fn executable_metadata(
+    selected: &HostExecutable,
+    file: &File,
+) -> Result<ExecutableMetadata, MachineError> {
+    let opened = file.metadata().map_err(|_| refusal())?;
+    let named = std::fs::symlink_metadata(&selected.path).map_err(|_| refusal())?;
+    let metadata = ExecutableMetadata::read(&opened);
+    if !secure_executable(&opened)
+        || !secure_executable(&named)
+        || metadata != ExecutableMetadata::read(&named)
         || std::fs::canonicalize(&selected.path).map_err(|_| refusal())? != selected.path
     {
         return Err(refusal());
     }
+    Ok(metadata)
+}
+
+pub(crate) fn inspect_executable(
+    selected: &HostExecutable,
+) -> Result<ExecutableMetadata, MachineError> {
+    executable_metadata(selected, &executable_descriptor(selected)?)
+}
+
+pub(crate) fn verify_executable(
+    selected: &HostExecutable,
+) -> Result<(File, ExecutableMetadata), MachineError> {
+    use sha2::{Digest as _, Sha256};
+    let mut file = executable_descriptor(selected)?;
+    let before = executable_metadata(selected, &file)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0; 65536];
     loop {
@@ -929,17 +1072,12 @@ fn verify_executable(selected: &crate::trusted_host::HostExecutable) -> Result<F
     }
     #[cfg(test)]
     crate::trusted_host::test_storage_fault();
-    let after = std::fs::symlink_metadata(&selected.path).map_err(|_| refusal())?;
-    if before.dev() != after.dev()
-        || before.ino() != after.ino()
-        || before.len() != after.len()
-        || before.mtime() != after.mtime()
-        || before.mtime_nsec() != after.mtime_nsec()
+    if before != executable_metadata(selected, &file)?
         || format!("{:x}", hasher.finalize()) != selected.sha256
     {
         return Err(refusal());
     }
-    Ok(file)
+    Ok((file, before))
 }
 
 /// Holds the verified executable descriptor; the later native launcher owns exec.
@@ -1240,7 +1378,6 @@ pub(crate) fn schema_matches(value: &Value, rule: &Value, base: &Value, depth: u
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::delegation_identity::OperationReceipt;
     use crate::trusted_host::tests::Fixture;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
@@ -1261,6 +1398,42 @@ pub(crate) mod tests {
             crate::engagement::IntentLookup::Accepted(receipt) => *receipt,
             state => panic!("expected original accepted receipt, received {state:?}"),
         }
+    }
+
+    fn refresh_before_mirror(
+        f: &Fixture,
+        store: HostStore,
+        binding: &BoundInvocation,
+    ) -> HostStore {
+        let previous = store.owner.configuration.executable.path.clone();
+        let owner_digest = store.owner.configuration_digest.clone();
+        let native_database = f.private.join(DATABASE);
+        let owner_bytes = std::fs::read(f.path()).unwrap();
+        let assert_prepared = |store: &HostStore| {
+            let row = store.read_record(&binding.event_digest).unwrap().unwrap();
+            let mirror = row.keyed.as_ref().unwrap();
+            assert_eq!(mirror.state, "prepared");
+            assert!(mirror.operation_ref.is_none());
+            assert!(mirror.receipt.is_none());
+        };
+        assert_prepared(&store);
+        drop(store);
+        let database_bytes = std::fs::read(&native_database).unwrap();
+        // Stop after the authoritative transaction commits, before any native
+        // mirror update, then replace the bytes at the configured path.
+        std::fs::write(previous, b"overwritten old host executable").unwrap();
+        let drift = VerifiedOwner::load(&f.home, &f.path()).err().unwrap();
+        assert_eq!(drift.code, "RECOVERY_REQUIRED");
+        assert_eq!(drift.details["reason"], "host_executable_refresh_required");
+        let replacement = f.refreshed_image("0.169.1");
+        f.refresh(&f.path(), &replacement, false).unwrap();
+        assert_eq!(std::fs::read(native_database).unwrap(), database_bytes);
+        assert_ne!(std::fs::read(f.path()).unwrap(), owner_bytes);
+        let store = f.ready();
+        assert_eq!(store.owner.configuration_digest, owner_digest);
+        assert_eq!(store.owner.configuration.executable, replacement);
+        assert_prepared(&store);
+        store
     }
     fn request(operation: &str) -> Value {
         fixtures()
@@ -1318,6 +1491,10 @@ pub(crate) mod tests {
         std::fs::write(&image, bytes).unwrap();
         std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(verify_executable(&selected).is_err());
+        for mode in [0o720, 0o702] {
+            std::fs::set_permissions(&image, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(verify_executable(&selected).is_err());
+        }
         std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
         let alias = f.private.join("image-alias");
         symlink(&image, &alias).unwrap();
@@ -1509,6 +1686,7 @@ pub(crate) mod tests {
             let value = selected_request(&store, "open_external_engagement");
             let (bound, _) = store.bind_native(event(state), value.clone()).unwrap();
             assert_eq!(store.begin_delivery(&bound).unwrap(), Delivery::Dispatch);
+            let operation = Uuid::now_v7();
             if state != "absent" {
                 let namespace = crate::operation::Namespace::delegation(
                     &store.owner.controller.identity,
@@ -1527,7 +1705,6 @@ pub(crate) mod tests {
                 };
                 let json = String::from_utf8(canonical(&envelope).unwrap()).unwrap();
                 let digest = crate::operation::envelope_digest(&envelope).unwrap();
-                let operation = Uuid::now_v7();
                 let mut product = crate::engagement::EngagementStore::open(
                     &crate::engagement::EngagementStore::workspace_database_path(
                         &store.owner.state_root,
@@ -1563,14 +1740,23 @@ pub(crate) mod tests {
                     })
                     .unwrap();
             }
+            let store = if state == "refused" {
+                refresh_before_mirror(&f, store, &bound)
+            } else {
+                assert!(store.require_settled_attempts().is_err(), "{state}");
+                store
+            };
             let lookup = store.reconcile_keyed(&bound).unwrap();
             assert!(
                 match state {
                     "absent" => matches!(lookup, crate::engagement::IntentLookup::Absent { .. }),
                     "prepared" | "unresolved" =>
                         matches!(lookup, crate::engagement::IntentLookup::Unresolved { .. }),
-                    "refused" =>
-                        matches!(lookup, crate::engagement::IntentLookup::NotAccepted { .. }),
+                    "refused" => matches!(
+                        lookup,
+                        crate::engagement::IntentLookup::NotAccepted { operation_ref, .. }
+                            if operation_ref == operation
+                    ),
                     _ => false,
                 },
                 "typed K lookup outcome {state}"
@@ -1587,6 +1773,10 @@ pub(crate) mod tests {
                 }
             );
             assert!(keyed.receipt.is_none());
+            if state == "refused" {
+                assert_eq!(keyed.operation_ref, Some(operation));
+                store.require_settled_attempts().unwrap();
+            }
             assert_eq!(store.begin_delivery(&bound).unwrap(), Delivery::Reconcile);
             let product = crate::engagement::EngagementStore::workspace_database_path(
                 &store.owner.state_root,
@@ -2611,10 +2801,8 @@ pub(crate) mod tests {
         );
         let record = store.read_record(&binding.event_digest).unwrap().unwrap();
         assert_eq!(record.keyed.as_ref().unwrap().state, "prepared");
-        // Simulate loss after the product commit, before mirror publication.
         drop(product);
-        drop(store);
-        let store = f.ready();
+        let store = refresh_before_mirror(&f, store, &binding);
         let bound = store
             .codex_delivery(&native.session, &native.tool_use, &value)
             .unwrap();
@@ -2644,25 +2832,39 @@ pub(crate) mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let mut changed: Record = serde_json::from_str(&original).unwrap();
-        let mirrored = changed.keyed.as_mut().unwrap().receipt.as_mut().unwrap();
-        mirrored.accepted_revision += 1;
-        mirrored.receipt_digest = mirrored.compute_digest().unwrap();
-        changed.keyed.as_ref().unwrap().validate().unwrap();
-        store
-            .connection
-            .execute(
-                "UPDATE native_calls SET record_json=?2 WHERE event_digest=?1",
-                params![
-                    bound.event_digest,
-                    String::from_utf8(canonical(&changed).unwrap()).unwrap()
-                ],
-            )
-            .unwrap();
-        assert!(
-            store.reconcile_keyed(&bound).is_err(),
-            "retained accepted receipt changed"
-        );
+        for state in ["accepted", "unresolved", "resolved_not_accepted"] {
+            let mut changed: Record = serde_json::from_str(&original).unwrap();
+            let mirror = changed.keyed.as_mut().unwrap();
+            mirror.state = state.into();
+            match state {
+                "accepted" => {
+                    let receipt = mirror.receipt.as_mut().unwrap();
+                    receipt.accepted_revision += 1;
+                    receipt.receipt_digest = receipt.compute_digest().unwrap();
+                }
+                "unresolved" => {
+                    mirror.operation_ref = Some(Uuid::now_v7());
+                    mirror.receipt = None;
+                }
+                "resolved_not_accepted" => mirror.receipt = None,
+                _ => unreachable!(),
+            }
+            mirror.validate().unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE native_calls SET record_json=?2 WHERE event_digest=?1",
+                    params![
+                        bound.event_digest,
+                        String::from_utf8(canonical(&changed).unwrap()).unwrap()
+                    ],
+                )
+                .unwrap();
+            assert!(store.require_settled_attempts().is_err(), "{state}");
+            if state == "accepted" {
+                assert!(store.reconcile_keyed(&bound).is_err());
+            }
+        }
         store
             .connection
             .execute(
@@ -2694,6 +2896,10 @@ pub(crate) mod tests {
             assert!(
                 store.reconcile_keyed(&bound).is_err(),
                 "product context mutation {case}"
+            );
+            assert!(
+                store.require_settled_attempts().is_err(),
+                "conflicting product context {case} authorized refresh"
             );
             assert_eq!(
                 store

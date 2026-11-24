@@ -424,9 +424,10 @@ private-endpoint disclosure, and any MCP advertisement under the selected
 
 #### Planned External Specialist MCP host boundary
 
-`trusted_host` owns explicit Operator-authorized setup, immutable protected
-owner configuration and the complete-setup launch precondition. `host_invocation`
-owns the private native-event map and separate K linkage. `specialist_stdio`
+`trusted_host` owns explicit Operator-authorized setup, protected owner identity
+and the complete-setup launch precondition. An authorized refresh replaces a
+caller-scoped owner's executable binding and preserves its identity.
+`host_invocation` owns the private native-event map and separate K linkage. `specialist_stdio`
 owns native framing/lifecycle and `specialist_facade` projects authenticated
 requests onto the existing semantic services. `managed_specialist` connects the
 separate successor tool at the authenticated Worker boundary; the legacy Primary
@@ -2681,12 +2682,15 @@ deterministic domain-separated SHA-256
 one-shot review) and key-name-only diagnostics for unclassified non-inclusion
 `config.toml` keys (`TASK-095`) and quiescent rollover and review ownership on
 eligible same-version or newer starts with zero Run members (`TASK-096`).
-The planned `TASK-097` covers hardened non-executing setup binding at the
-caller-scoped (`External + Some` and `Managed + Some`) route minimum versions
-(`Codex >= 0.169.0`, `Claude >= 2.1.310`), split-digest `schema_version: 2`
-online `owner-executable-refresh`
-(preserving `migrated_from_v1_digest` lineage across all five consumer modules)
-and `v1`/`v2` compatible `adapter_version` continuity in `trusted_host`.
+Caller-scoped trusted hosts (`External + Some` and `Managed + Some`) bind
+operator-attested executables at the route minimums (`Codex >= 0.169.0`,
+`Claude >= 2.1.310`). Setup and `owner-executable-refresh` verify the executable
+without running it. `owner.json` at `schema_version: 2` separates owner identity
+from executable identity and retains `migrated_from_v1_digest` for readers of
+historical records. New records use the stable digest. HostStore refresh and
+owner-scoped writers acquire `host.lock` before any preparation registry writer
+lock, and refresh publishes only `owner.json`. Both owner schema versions accept
+compatible `adapter_version` values within the same `adapter_id`.
 The planned `TASK-098` covers Gate C and Gate D requalification for the
 superseding `v0.1.4` H3/H4 pair.
 
@@ -4253,8 +4257,13 @@ architecture contract allows them:
   `orchestration`, `paths`, `provisioning`, `review`, `run`, `successor_capture`,
   `task_request`, `trusted_host`: protected preparation and source projection
 - `host_invocation` → `caller_scope`, `darwin`, `delegation_identity`,
-  `delegation_service`, `engagement`, `jcs`, `machine`, `operation`, `trusted_host`:
-  protected native identity, K-only linkage and delivery bookkeeping
+  `delegation_service`, `engagement`, `jcs`, `machine`, `operation`,
+  `specialist_facade`, `trusted_host`: protected native identity, K-only linkage
+  and delivery bookkeeping. During refresh, `host_invocation` asks
+  `specialist_facade` to interpret attempted S requests and read their original
+  outcome through `delegation_service`. The read leaves `HostStore` locked
+  without reopening it or dispatching a request. The original service owners
+  retain acceptance and settlement authority.
 
 `specialist_stdio` depends on `darwin`, `host_invocation`, `jcs`, `machine`, `paths`, `specialist_facade` and `trusted_host`. `specialist_facade` depends on `caller_scope`, `controller`, `delegation_identity`, `delegation_service`, `engagement`, `host_invocation`, `machine`, `operation`, `paths`, `semantic`, `source_binding`, `task_request` and `trusted_host`; it owns transport projection, never product acceptance. `managed_specialist` uses the same verified owner and service projection from `worker`, plus `run`, `turn`, `controller`, `delegation_identity`, `operation`, `paths`, `machine` and `host_invocation`. It resolves the protected Root connection and current authority before dispatch. `trusted_host` calls it only for explicit connection publication. `trusted_host` owns administrative member recovery. It authenticates Operator and exact protected owner scope, then calls the existing reconciliation services/semantic port. `delegation_service` reads managed recovery provenance from the original accepted task and verified intent/receipt in one read snapshot. It returns only an internal owned context, never a model capability. The adapter revalidates its protected configuration before the effectful port; no host persistence lock spans history I/O. The existing lifecycle/history owner retains settlement, member credentials and original-generation absence proofs. No observer or ordinary MCP dispatch enters this boundary.
 

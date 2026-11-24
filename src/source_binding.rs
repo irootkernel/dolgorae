@@ -138,6 +138,19 @@ impl Partition {
             owner: owner.configuration.owner.clone(),
         })
     }
+
+    fn matches(&self, expected: &Self, owner: &VerifiedOwner) -> bool {
+        owner.matches_persisted_owner_digest(&self.owner_digest)
+            && self.schema_version == expected.schema_version
+            && self.workspace == expected.workspace
+            && self.canonical_workspace == expected.canonical_workspace
+            && self.birth == expected.birth
+            && self.generation == expected.generation
+            && self.principal == expected.principal
+            && self.controller_generation == expected.controller_generation
+            && self.caller == expected.caller
+            && self.owner == expected.owner
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -201,17 +214,18 @@ fn no_pending(directory: &PrivateDirectory, name: &str) -> Result<(), MachineErr
     }
 }
 
-struct Registry {
+struct Registry<'a> {
     directory: PrivateDirectory,
     partition: Partition,
+    owner: &'a VerifiedOwner,
 }
-impl Registry {
-    fn open(owner: &VerifiedOwner) -> Result<Self, MachineError> {
+impl<'a> Registry<'a> {
+    fn open(owner: &'a VerifiedOwner) -> Result<Self, MachineError> {
         let partition = Partition::current(owner)?;
         let directory = PrivateDirectory::open(&owner.root.path.join(DIRECTORY))?;
         no_pending(&directory, "metadata.json")?;
         let existing: Partition = directory.read(&directory.path.join("metadata.json"))?;
-        if existing != partition {
+        if !existing.matches(&partition, owner) {
             return Err(refusal());
         }
         // Check the lock even for read-only projection; a partial init is not ready.
@@ -219,6 +233,7 @@ impl Registry {
         Ok(Self {
             directory,
             partition,
+            owner,
         })
     }
     fn component<T: serde::de::DeserializeOwned>(
@@ -243,7 +258,7 @@ impl Registry {
         no_pending(&self.directory, name)?;
         let index: Index = self.directory.read(&self.directory.path.join(name))?;
         let record: Record = self.component(&index.record, RECORD_BYTES)?;
-        if record.partition != self.partition {
+        if !record.partition.matches(&self.partition, self.owner) {
             return Err(refusal());
         }
         Ok(record)
@@ -263,11 +278,13 @@ impl Registry {
             return Err(refusal());
         }
         let reference = Component::of(&bytes);
+        let _owner_lock = self.owner.root.lock()?;
+        self.owner.revalidate()?;
         let _lock = self.directory.lock()?;
         let index_path = self.directory.path.join(name);
         match std::fs::symlink_metadata(&index_path) {
             Ok(_) => {
-                if self.record(name)? != record {
+                if self.record(name)?.prepared != record.prepared {
                     return Err(conflict());
                 }
                 // Verify every complete component on idempotent registration too.
@@ -431,7 +448,7 @@ pub(crate) fn initialize(owner: &VerifiedOwner) -> Result<(), MachineError> {
             no_pending(&directory, "metadata.json")?;
             let existing: Partition = directory.read(&path.join("metadata.json"))?;
             directory.open_file(&path.join(crate::trusted_host::LOCK_NAME))?;
-            if existing != partition {
+            if !existing.matches(&partition, owner) {
                 return Err(refusal());
             }
         }
@@ -1025,6 +1042,33 @@ mod tests {
         member: Uuid,
         port: services::tests::FakePort,
     }
+
+    #[test]
+    fn executable_refresh_preserves_an_open_engagement_with_a_hired_specialist() {
+        let scene = Scene::new(false, HostRoute::Codex, false);
+        let SettlementOwner::External { engagement_id } = scene.aggregate else {
+            unreachable!()
+        };
+        let old = scene.f.owner();
+        let retained = services::get_external_engagement(&scope(&old), engagement_id).unwrap();
+        assert_eq!(retained.state, "open");
+        assert_eq!(retained.members.len(), 1);
+        assert_eq!(retained.members[0].member_ref, scene.member.to_string());
+        let database = old.root.path.join("invocations.sqlite");
+        let bytes = fs::read(&database).unwrap();
+        let executable = scene.f.refreshed_image("0.169.1");
+        fs::remove_file(&old.configuration.executable.path).unwrap();
+        scene
+            .f
+            .refresh(&scene.f.path(), &executable, false)
+            .unwrap();
+        let current = scene.f.owner();
+        let observed = services::get_external_engagement(&scope(&current), engagement_id).unwrap();
+        assert_eq!(observed, retained);
+        assert_eq!(current.configuration_digest, old.configuration_digest);
+        assert_eq!(fs::read(database).unwrap(), bytes);
+    }
+
     impl Scene {
         fn new(managed: bool, route: HostRoute, git: bool) -> Self {
             Self::new_with_access(managed, route, git, false)

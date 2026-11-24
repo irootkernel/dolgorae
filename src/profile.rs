@@ -7,7 +7,7 @@ use crate::jcs::{
 };
 use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
-use crate::workspace::{NativeSubagents, RuntimeProfile};
+use crate::workspace::{NativeSubagents, RuntimeProfile, RuntimeVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -3904,96 +3904,17 @@ fn tested_runtime_schema(
     Ok(None)
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct RuntimeVersion {
-    core: (u64, u64, u64),
-    prerelease: Vec<String>,
-}
-
-impl Ord for RuntimeVersion {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.core
-            .cmp(&other.core)
-            .then_with(|| self.prerelease.is_empty().cmp(&other.prerelease.is_empty()))
-            .then_with(|| {
-                for (left, right) in self.prerelease.iter().zip(&other.prerelease) {
-                    let numeric = |value: &str| value.bytes().all(|byte| byte.is_ascii_digit());
-                    let order = match (numeric(left), numeric(right)) {
-                        (true, true) => left.len().cmp(&right.len()).then_with(|| left.cmp(right)),
-                        (true, false) => std::cmp::Ordering::Less,
-                        (false, true) => std::cmp::Ordering::Greater,
-                        (false, false) => left.cmp(right),
-                    };
-                    if order != std::cmp::Ordering::Equal {
-                        return order;
-                    }
-                }
-                self.prerelease.len().cmp(&other.prerelease.len())
-            })
-    }
-}
-
-impl PartialOrd for RuntimeVersion {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 pub(crate) fn parse_version(
     profile_name: &str,
     value: &str,
 ) -> Result<RuntimeVersion, MachineError> {
-    let invalid = || {
+    RuntimeVersion::parse(value).ok_or_else(|| {
         compatibility(
             profile_name,
             "codex_version",
             "invalid Codex semantic version",
         )
-    };
-    let (without_build, build) = value
-        .split_once('+')
-        .map_or((value, None), |(main, build)| (main, Some(build)));
-    let (core, prerelease) = without_build
-        .split_once('-')
-        .map_or((without_build, None), |(core, prerelease)| {
-            (core, Some(prerelease))
-        });
-    let valid_identifier = |id: &str| {
-        !id.is_empty()
-            && id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    };
-    if build.is_some_and(|build| !build.split('.').all(valid_identifier)) {
-        return Err(invalid());
-    }
-    let prerelease = if let Some(prerelease) = prerelease {
-        let identifiers: Vec<_> = prerelease.split('.').map(str::to_owned).collect();
-        if identifiers.iter().any(|id| {
-            !valid_identifier(id)
-                || (id.len() > 1
-                    && id.starts_with('0')
-                    && id.bytes().all(|byte| byte.is_ascii_digit()))
-        }) {
-            return Err(invalid());
-        }
-        identifiers
-    } else {
-        Vec::new()
-    };
-    let mut components = core.split('.');
-    let mut component = || {
-        components
-            .next()
-            .filter(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
-            .and_then(|part| part.parse::<u64>().ok())
-            .ok_or_else(invalid)
-    };
-    let core = (component()?, component()?, component()?);
-    if components.next().is_some() {
-        return Err(invalid());
-    }
-    Ok(RuntimeVersion { core, prerelease })
+    })
 }
 
 impl ProfileSnapshot {
@@ -9039,7 +8960,17 @@ mod tests {
             "0.169.0+one+two",
             "0.169.0-β",
         ] {
-            assert!(parse_version("default", invalid).is_err(), "{invalid}");
+            let error = parse_version("default", invalid).unwrap_err();
+            assert_eq!(error.code, "COMPATIBILITY_REJECTED", "{invalid}");
+            assert_eq!(
+                error.details,
+                json!({
+                    "profile": "default",
+                    "check": "codex_version",
+                    "expected": "conformance with Codex >= 0.158.0",
+                    "actual": "invalid Codex semantic version",
+                })
+            );
         }
         assert!(version_verdict("default", "0.158.0-rc.1").is_err());
         assert_eq!(

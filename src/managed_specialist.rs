@@ -25,6 +25,7 @@ pub(crate) fn has_explicit_connection(state_root: &Path, root: Uuid) -> Result<b
     }
 }
 pub(crate) fn connect(owner: &VerifiedOwner) -> Result<(), MachineError> {
+    let _lock = owner.root.lock()?;
     owner.revalidate()?;
     let OwnerKind::Managed { session_ref } = owner.configuration.owner else {
         return Err(refusal());
@@ -40,7 +41,11 @@ pub(crate) fn connect(owner: &VerifiedOwner) -> Result<(), MachineError> {
     match std::fs::symlink_metadata(&path) {
         Ok(_) => {
             let existing: Connection = root.read(&path)?;
-            if existing != record {
+            if existing.schema != record.schema
+                || existing.root_run != record.root_run
+                || existing.owner_path != record.owner_path
+                || !owner.matches_persisted_owner_digest(&existing.owner_digest)
+            {
                 return Err(refusal());
             }
         }
@@ -87,7 +92,7 @@ pub(crate) fn load(
             != (OwnerKind::Managed {
                 session_ref: root_run,
             })
-        || owner.configuration_digest != record.owner_digest
+        || !owner.matches_persisted_owner_digest(&record.owner_digest)
     {
         return Err(refusal());
     }

@@ -813,21 +813,21 @@ Profile retirement, foreground Child termination and current-main owned-root
 process census must finish before success. Failed roots, unknown effects and
 unproved absence remain explicit.
 
-Historical TASK-077 MCP host qualification additionally selects Claude Code `2.1.310`
-(`ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd`); planned
-`EPIC-024` (`TASK-095` through `TASK-098`) transitions caller-scoped host setup
-(`External` and caller-scoped `Managed`) to `Codex >= 0.169.0` and `Claude >=
-2.1.310` hardened non-executing setup binding with split-digest `schema_version:
-2` online refresh alongside digest-only unclassified `config.toml` capture and
-dedicated-entrypoint quiescent same-or-newer server rollover. The
-[runtime qualification
-owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-owns historical host qualification pins, `EPIC-024` external-host floors, and
-the new-creation minimum of Codex 0.169.0. Newer runtimes may be attempted
-without per-version registration and retain unverified compatibility until
-separately tested. Schema generation at 0.159.3 and 0.164.0 establishes
-protocol differences, while native campaigns establish behavior. The historical
-H1 qualification remains unchanged.
+Caller-scoped External and Managed owners attest `Codex >= 0.169.0` or
+`Claude >= 2.1.310` and supply the canonical executable path and SHA-256. For
+offline setup and refresh checks, use fixture executables that leave a marker
+if they run. Hash the open file and recheck its descriptor metadata before
+publishing. A retained `schema_version: 1` owner lets the fixture verify receipt
+and preparation continuity. Check that refresh changes `owner.json` and leaves
+`invocations.sqlite` byte-for-byte intact.
+
+The [runtime qualification owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
+records the exact historical TASK-077 host hashes and the current admission
+floors. Later binaries can be admitted without per-version registration and
+retain unverified compatibility until separately tested. Schema generation at
+0.159.3 and 0.164.0 establishes protocol differences. Native campaigns qualify
+behavior for their selected executables. The H1 qualification remains the
+historical record.
 
 Caller Primary asynchronous admission keeps one existing slot available for
 Controller approval responses, even when blocking tools occupy the ordinary

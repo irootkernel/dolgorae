@@ -504,6 +504,28 @@ fn external_owner(request: &Value) -> Result<SettlementOwner, MachineError> {
         },
     })
 }
+
+pub(crate) fn external_state_delivery_settled(
+    owner: &VerifiedOwner,
+    request: &Value,
+) -> Result<bool, MachineError> {
+    let scope = DelegationScope {
+        view: &owner.view,
+        state_root: &owner.state_root,
+        controller: &owner.controller,
+        trusted_invocation: None,
+    };
+    service::observe_state_control_completion(
+        &scope,
+        external_owner(request)?,
+        None,
+        operation_static(text(request, "operation")?)?,
+        optional_id(request, "member_ref")?,
+        optional_id(request, "task_ref")?,
+        state_body(request).as_ref(),
+    )
+    .map(|(_, settled)| settled)
+}
 fn external_scope(request: &Value) -> Option<(&str, &str)> {
     if request["operation"] == "lookup_operation" {
         request["namespace"]["scope_kind"]

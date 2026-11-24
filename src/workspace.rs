@@ -211,6 +211,92 @@ pub struct RuntimeProfile {
     pub native_subagents: NativeSubagents,
 }
 
+/// Runtime version precedence ignores build metadata.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeVersion {
+    core: (u64, u64, u64),
+    prerelease: Vec<String>,
+}
+
+impl Ord for RuntimeVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.core
+            .cmp(&other.core)
+            .then_with(|| self.prerelease.is_empty().cmp(&other.prerelease.is_empty()))
+            .then_with(|| {
+                for (left, right) in self.prerelease.iter().zip(&other.prerelease) {
+                    let numeric = |value: &str| value.bytes().all(|byte| byte.is_ascii_digit());
+                    let order = match (numeric(left), numeric(right)) {
+                        (true, true) => left.len().cmp(&right.len()).then_with(|| left.cmp(right)),
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        (false, false) => left.cmp(right),
+                    };
+                    if order != std::cmp::Ordering::Equal {
+                        return order;
+                    }
+                }
+                self.prerelease.len().cmp(&other.prerelease.len())
+            })
+    }
+}
+
+impl PartialOrd for RuntimeVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl RuntimeVersion {
+    // Older Profile records allow leading zeroes in the core. Boundaries that
+    // require canonical core components enforce that before parsing.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let (without_build, build) = value
+            .split_once('+')
+            .map_or((value, None), |(main, build)| (main, Some(build)));
+        let (core, prerelease) = without_build
+            .split_once('-')
+            .map_or((without_build, None), |(core, prerelease)| {
+                (core, Some(prerelease))
+            });
+        let valid_identifier = |id: &str| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        };
+        if build.is_some_and(|build| !build.split('.').all(valid_identifier)) {
+            return None;
+        }
+        let prerelease = if let Some(prerelease) = prerelease {
+            let identifiers: Vec<_> = prerelease.split('.').map(str::to_owned).collect();
+            if identifiers.iter().any(|id| {
+                !valid_identifier(id)
+                    || (id.len() > 1
+                        && id.starts_with('0')
+                        && id.bytes().all(|byte| byte.is_ascii_digit()))
+            }) {
+                return None;
+            }
+            identifiers
+        } else {
+            Vec::new()
+        };
+        let mut components = core.split('.');
+        let mut component = || {
+            components
+                .next()
+                .filter(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+                .and_then(|part| part.parse::<u64>().ok())
+        };
+        let core = (component()?, component()?, component()?);
+        if components.next().is_some() {
+            return None;
+        }
+        Some(Self { core, prerelease })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeSubagents {

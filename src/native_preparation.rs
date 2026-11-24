@@ -308,6 +308,14 @@ pub(crate) mod tests {
         let owner = f.owner();
         assert!(owner.configuration.caller_scope.is_none());
         let original = std::fs::read(&owner.path).unwrap();
+        let executable = f.f.refreshed_image("0.170.0");
+        assert_eq!(
+            f.f.refresh(&owner.path, &executable, false)
+                .unwrap_err()
+                .code,
+            "RECOVERY_REQUIRED"
+        );
+        assert_eq!(std::fs::read(&owner.path).unwrap(), original);
         f.boot().unwrap();
         assert_eq!(std::fs::read(&owner.path).unwrap(), original);
         let (_, loaded) = crate::managed_specialist::load(&f.state(), f.manifest.run_id).unwrap();
@@ -318,6 +326,35 @@ pub(crate) mod tests {
         std::fs::set_permissions(&connection, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(f.boot().is_err());
         assert!(crate::managed_specialist::load(&f.state(), f.manifest.run_id).is_err());
+    }
+
+    #[test]
+    fn retained_preparations_accept_only_the_authenticated_v1_lineage() {
+        let mut f = crate::trusted_host::tests::Fixture::new(HostRoute::Codex);
+        f.complete_legacy();
+        let old = f.owner();
+        let name = "prepared-refresh.json";
+        let request = json!({"selection": "exact"});
+        let response = json!({"proof": "retained"});
+        let prepared = Prepared {
+            owner: old.configuration_digest.clone(),
+            request: request.clone(),
+            response: response.clone(),
+        };
+        old.root
+            .publish(name, &canonical(&prepared).unwrap())
+            .unwrap();
+        let path = old.root.path.join(name);
+        let old_bytes = std::fs::read(&path).unwrap();
+        let executable = f.refreshed_image("0.169.1");
+        f.refresh(&f.path(), &executable, false).unwrap();
+        let current = f.owner();
+        assert_eq!(retained(&current, name, &request).unwrap(), Some(response));
+        assert_eq!(std::fs::read(&path).unwrap(), old_bytes);
+        let mut foreign = prepared;
+        foreign.owner = format!("sha256:{}", "0".repeat(64));
+        std::fs::write(&path, canonical(&foreign).unwrap()).unwrap();
+        assert!(retained(&current, name, &request).is_err());
     }
 
     #[test]
@@ -1363,7 +1400,7 @@ fn retained(
                 &path,
                 (crate::specialist_facade::PUBLIC_LIMIT * 2 + 65_536) as u64,
             )?;
-            if old.owner != owner.configuration_digest {
+            if !owner.matches_persisted_owner_digest(&old.owner) {
                 return Err(refusal());
             }
             if old.request != *request {
@@ -1458,13 +1495,14 @@ pub(crate) fn dispatch(
         return Ok(existing);
     }
     let _lock = owner.root.lock()?;
+    owner.revalidate()?;
     match std::fs::symlink_metadata(owner.root.path.join(&name)) {
         Ok(_) => {
             let old: Prepared = owner.root.read_bounded(
                 &owner.root.path.join(&name),
                 (crate::specialist_facade::PUBLIC_LIMIT * 2 + 65_536) as u64,
             )?;
-            if old.owner != record.owner
+            if !owner.matches_persisted_owner_digest(&old.owner)
                 || old.request != record.request
                 || old.response != response
             {
