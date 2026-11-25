@@ -93,7 +93,7 @@ Master approved all four remediations inside the unreleased `v0.1.4` boundary
   Operator stop/migration rather than silently downgrading the shared server).
 - **Caller-scoped `trusted_host` admission and protocol resilience**: define the
   complete 4-cell `(OwnerKind x caller_scope)` matrix (`External + Some` and
-  `Managed + Some` get route floors `Codex >= 0.169.0` / `Claude >= 2.1.310`,
+  `Managed + Some` get fresh route floors `Codex >= 0.172.0` / `Claude >= 2.1.310`,
   non-executing `verify_executable` hardening, `schema_version: 2` split digest,
   and online `owner-executable-refresh`; `Managed + None` keeps exact root-Run
   `launch_snapshot` equality and refuses refresh; `External + None` stays
@@ -350,18 +350,27 @@ Execute sequentially in roadmap order: `TASK-095` -> `TASK-096` -> `TASK-097`
 
 ### TASK-098: Superseding v0.1.4 H3 Candidate, Three-Consumer Requalification, and Refreshed Gate C/D Handoff
 
-- **Owning modules and contracts**: `docs/specs/dolgorae-v014-gate-c-d-acceptance.md`,
+- **Owning modules and contracts**: the Profile compatibility registry
+  (`docs/protocol/codex-0.157.0-required-subset.json`), runtime admission and
+  retained binding paths in `src/global_runtime.rs`, `src/profile.rs`,
+  `src/trusted_host.rs` and the delegation owners, ADR-043,
+  `docs/specs/dolgorae-v014-gate-c-d-acceptance.md`,
   `docs/todo/TODO-DOLGORAE-V014-RELEASE-ALIGNMENT.md`, `CHANGELOG.md`, and
   `evidence/aquarium/EPIC-024/` (preserving historical `evidence/aquarium/EPIC-022/`).
 - **Required behavior**:
-  1. Package the superseding intended-version `v0.1.4` H3 Dolgorae release
+  1. Raise the Codex minimum to `0.172.0` for new qualified creation and
+     caller-scoped host setup or refresh. Keep retained 0.169.x through
+     0.171.x bindings and v2 owner records usable under their original rules.
+     Register exact `0.172.0` for tested Profile compatibility with both schema
+     digests and version-specific runtime evidence.
+     Package the superseding intended-version `v0.1.4` H3 Dolgorae release
      candidate after `TASK-095`..`TASK-097` complete, verifying zero wire drift
      against immutable `H1` (`0927cbf8...`) and `dolgorae-public-v2.descriptor.pb`
      (`c34b1da6...`) and isolated skill packaging via `make validate-agent-skills`
      (without mutating host-installed skills).
   2. Execute and record full impact assessment and mandatory three-consumer
      requalification (`AQ-01..06`, `PW-01..06`, `GU-01..06`):
-     - fresh external Codex (`>= 0.169.0`) and Claude (`>= 2.1.310`) MCP host
+     - fresh external Codex (`>= 0.172.0`) and Claude (`>= 2.1.310`) MCP host
        qualification + online `owner-executable-refresh` with open engagements
        (`AQ-01..06`);
      - Podway `0.2.15`/`0.2.16` caller-scoped `Managed` adapter/receipt/refresh/recovery

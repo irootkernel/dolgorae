@@ -396,7 +396,8 @@ the native qualification contract (amended by Master on 2026-11-11 and
 2026-11-17 to permit Codex `>=0.169.0` Compatible/Unverified creation policy,
 suspend physical-device/performance checkpoints, and replace actual 24-hour/OS-sleep
 with injected-time boundary tests plus a 30-minute three-client functional
-campaign) and a private disposable workspace. H3 MUST bind the qualified
+campaign) and a private disposable workspace. The EPIC-024 successor raises
+the fresh creation floor to Codex `0.172.0`. H3 MUST bind the qualified
 execution runtime; a replacement requires impact assessment and affected
 requalification. On Codex `>=0.169.0`, user-selected session and per-turn
 reasoning effort overrides differing from the Profile `config.toml` default are

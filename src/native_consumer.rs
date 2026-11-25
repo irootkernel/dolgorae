@@ -1087,7 +1087,7 @@ pub(crate) mod tests {
         let original_scope = store.scope.clone();
         let path = old.root.path.join(DATABASE);
         let original_bytes = std::fs::read(&path).unwrap();
-        let replacement = fixture.refreshed_image("0.169.1");
+        let replacement = fixture.refreshed_image("0.172.1");
         fixture
             .refresh(&fixture.path(), &replacement, false)
             .unwrap();

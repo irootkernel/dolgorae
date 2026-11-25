@@ -605,7 +605,10 @@ acceptance authority. A delivery marker commits before a mutator runs. Repeated
 ambiguous delivery performs authorized original-key or state observation only;
 it cannot retry a mutation transparently. Read methods always observe afresh.
 Native group assignment is K: its protected linkage names the original
-`assign_group` namespace and the immutable group receipt. Native `await_group`
+`assign_group` namespace and the immutable group receipt. Before a fresh group
+commits its receipt, quota or member reservations, each selected provisioning
+snapshot must satisfy the current runtime admission floor. Original-key replay
+uses the recorded group admission. Native `await_group`
 and `collect_group` are R and authenticate each observation without admitting an
 operation, charging a round or resuming a child. Both external host carriers and
 the managed Worker use the existing group service and its aggregate owner proof.
@@ -1273,11 +1276,13 @@ uncertain dispatch, not a proved non-dispatch.
 
 ## Current host and Profile runtime qualification
 
-New creation requires Codex `0.169.0` or newer. Higher versions can be attempted
-without a version/hash registry entry. Required protocol and configuration
-checks remain mandatory, and untested versions retain `unverified` compatibility.
-A successful attempt does not establish generic tested-runtime qualification or
-real-account/model behavior. The selected executable is captured by its actual
+New qualified creation requires Codex `0.172.0` or newer. The exact `0.172.0`
+release is registered as `tested` and projects as `COMPATIBLE` when the required
+subset and both pinned schema bundles match. Newer unregistered releases can
+be attempted subject to required protocol and configuration checks and retain
+`unverified` compatibility. Accountless Profile registration covers app-server
+behavior. Real-account and hosted model behavior require their own evidence.
+The selected executable is captured by its actual
 path, device, inode and SHA-256; subsequent identity drift still refuses.
 
 A resident Code Mode host is captured from the selected installation's regular,
@@ -1320,7 +1325,7 @@ caller_scope)` matrix in `trusted_host`, both caller-scoped variants
 (`External + caller_scope: Some` for external MCP hosts and `Managed +
 caller_scope: Some` for caller-scoped delegated sessions such as Podway) replace
 those compiled-in single-binary SHA-256 pins with operator-attested route
-minimum-version floors (`Codex >= 0.169.0` under wire route `codex-0.160.0` and
+minimum-version floors (`Codex >= 0.172.0` under wire route `codex-0.160.0` and
 `Claude >= 2.1.310` under wire route `claude-code-2.1.295`) plus hardened
 non-executing `verify_executable` setup binding (adding uid/root ownership and
 non-group/world-writable checks to `O_NOFOLLOW`, full-path `canonicalize`, and
@@ -1356,18 +1361,21 @@ its original durable owner. Durable open engagements and hired Specialists can
 stay open. Use `--allow-downgrade` to authorize a decrease down to the route
 floor. The `TASK-077` compiled-in pins continue to validate historical
 caller-scoped `v1` records and refresh preserves their existing receipt lookup.
+Retained Codex `v2` owners use the original `0.169.0` floor for lookup, launch
+and recovery. Refresh must select an executable at or above the current floor,
+including when `--allow-downgrade` is set.
 
 New qualified caller-workspace startup/policy, instruction-discovery and
 checked-review admissions, and member/task acceptances depending on those
-mechanisms, require Codex 0.169.0 or newer before their acceptance commits or
+mechanisms, require Codex 0.172.0 or newer before their acceptance commits or
 launches. An installed provisioning snapshot, accepted policy or pending approval does not
 qualify a new member or task. Authenticate the owner and check the original key
 and request digest before applying current admission. Exact accepted replay and
 recovery use the original binding and preserve its bytes, launch contract,
 receipts and supported release, closure and collection paths. Accepted Codex
-0.159.3 bindings retain their original qualification and never inherit the new
-executable. Missing or changed executables refuse restart without substitution
-or re-execution.
+0.159.3 bindings and qualified bindings admitted under the former 0.169.0
+floor retain their original qualification and executable. Missing or changed
+executables refuse restart without substitution or re-execution.
 
 An approval resolution that would admit a new member performs the minimum-version
 check after owner authentication and original-resolution lookup, before storing

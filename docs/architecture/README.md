@@ -2664,14 +2664,15 @@ and capability.
 
 The [runtime qualification
 owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-requires Codex 0.169.0 or newer for new qualified caller-workspace,
+requires Codex 0.172.0 or newer for new qualified caller-workspace,
 instruction-discovery and checked-review admissions. Admission uses the minimum
 version and actual protocol/configuration evidence, without a version/hash
 allowlist. Untested newer versions retain unverified compatibility. The shared Profile and worker launch
 functions serve both new admissions and retained execution. Their callers
 authenticate and resolve original acceptance first, then apply the current check
 before a new qualified-mechanism acceptance or its launch. Retained execution
-validates its original binding, executable and process evidence. A member install
+validates its original binding, executable and process evidence, including
+qualified bindings admitted at the former 0.169.0 floor. A member install
 or policy acceptance does not authorize a new member or task. Generic Profile
 lifecycle and binding history retain tested/unverified compatibility admission. Migration compensation retains its original snapshot
 and durable owner. Earlier external-host evidence uses Codex
@@ -2683,9 +2684,11 @@ one-shot review) and key-name-only diagnostics for unclassified non-inclusion
 `config.toml` keys (`TASK-095`) and quiescent rollover and review ownership on
 eligible same-version or newer starts with zero Run members (`TASK-096`).
 Caller-scoped trusted hosts (`External + Some` and `Managed + Some`) bind
-operator-attested executables at the route minimums (`Codex >= 0.169.0`,
-`Claude >= 2.1.310`). Setup and `owner-executable-refresh` verify the executable
-without running it. `owner.json` at `schema_version: 2` separates owner identity
+operator-attested executables at the current route minimums (`Codex >= 0.172.0`,
+`Claude >= 2.1.310`). Retained Codex v2 owners keep the original 0.169.0 floor
+and the exact recorded executable binding. Setup and `owner-executable-refresh`
+verify the executable without running it. `owner.json` at `schema_version: 2`
+separates owner identity
 from executable identity and retains `migrated_from_v1_digest` for readers of
 historical records. New records use the stable digest. HostStore refresh and
 owner-scoped writers acquire `host.lock` before any preparation registry writer
@@ -4052,7 +4055,8 @@ The checked 0.157.0 manifest remains the required-subset comparison baseline.
 Runtime versions below 0.158.0 are rejected. The minimum's exact schemas stay
 in `pinned_runtime_schema`; `verified_runtime_schemas` records additional generic
 runtime versions after live compatibility, access-safety and Profile launch
-checks. Every registered version requires both of its exact stable and
+checks. The Codex 0.172.0 campaigns used the native app-server with accountless
+scripted loopback Responses. Every registered version requires both of its exact stable and
 experimental bundle digests as well as the required subset before reporting
 `tested`. Unlisted compatible versions remain `unverified`. This registry does
 not qualify caller-workspace startup or the checked Reviewer mechanism; their

@@ -19,8 +19,8 @@ from run_live_instruction_discovery import checked_codex, executable_identity, i
 from run_native_workspace_policy_fixture import ScriptedResponses, fixture_config
 
 OPT_IN = "DOLGORAE_RUN_NATIVE_CALLER_PIPELINE"
-CODEX_VERSION = "0.169.0"
-CODEX_SHA256 = "739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002"
+CODEX_VERSION = "0.172.0"
+CODEX_SHA256 = "f30a99714dc984876864239ef60563949b1e21421a7c9180422f51fd39186bc6"
 
 
 class InteractionResponses(ScriptedResponses):

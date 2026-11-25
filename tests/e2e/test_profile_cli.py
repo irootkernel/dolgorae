@@ -601,7 +601,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
 
         # The release runtime is eligible for ordinary workspace admission.
         # The unclassified config alone must prevent checked Reviewer allocation.
-        set_mode(fake, version="0.169.0")
+        set_mode(fake, version="0.172.1")
         runtime = envelope(run(binary, home, "runtime", "capabilities", "--profile", "default"))
         caller_workspace = runtime["data"]["caller_workspace"]
         if (
@@ -627,7 +627,7 @@ def validate(binary: pathlib.Path, protocol_root: pathlib.Path) -> None:
 
         config_path.unlink()
         try:
-            for version in ("0.170.0-rc.1", "0.169.0+local"):
+            for version in ("0.173.0-rc.1", "0.172.0+local"):
                 set_mode(fake, version=version)
                 checked = run(
                     binary, home, "specialist", "review", "--workspace", str(workspace),

@@ -3106,6 +3106,11 @@ while keeping `codex app-server` and all checked `public-v1`, `public-v2`,
    `Managed` refresh/receipts), and Gul H4 paths (including historical-H3
    in-place upgrade under both quiescent rollover and live-member operator
    migration), and require refreshed Gate C and Gate D acceptance before release.
+   Raise the Codex minimum to `0.172.0` for new qualified creation and
+   caller-scoped host setup or refresh. Retained bindings and v2 owners keep
+   the admission rules at the former floor. Register exact `0.172.0` for
+   Profile compatibility after its own native compatibility, access-safety and
+   Profile launch checks.
 
 ### Consequences
 

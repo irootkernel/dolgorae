@@ -23,6 +23,23 @@ actual `v0.1.4` and Gul `v0.1.0` release eligibility now additionally requires
 completing `EPIC-024` and recording its superseding H3/H4 Gate C and Gate D
 acceptance in `TASK-098`.
 
+### EPIC-024 Gul requalification handoff
+
+Gul reported accountless lifecycle and 250-turn history, both in-place upgrade
+paths, digest-only configuration, and bounded isolated real-account results for
+H3 `819dd50c9e78`, H4 `bfac15c363bd` / `4e0b739c38cf`, and Codex `0.172.0`.
+The H4 build revision is `08bd4f16`. The Gul evidence at `f0c6c62` has
+manifest SHA-256 `607a5d83af19797df6c9aea5da31190adc5776373a74183c6cfdf67fec60c392`.
+The real-account session did not emit an interactive approval prompt. Gul
+records approval UI coverage in its automated and accountless suites.
+
+After that handoff, the producer set Codex `0.172.0` as the floor for fresh
+admission and registered the release as Profile `COMPATIBLE`. The H4 evidence
+stays bound to H3 `819dd50c9e78`. Use those `0.172.0` results for impact
+assessment and check the changed admission, Profile compatibility and
+retained-execution paths on the next H3. Three-consumer adjudication and
+Gate C/D acceptance remain pending.
+
 ## Immutable Release-Pair Inputs
 
 Zero unqualified rebuilds occurred during `TASK-088` or `TASK-089`. Every

@@ -50,6 +50,12 @@ handshake, account/model discovery and absent-thread errors. Registration pins
 both generated schema bundles. Caller-workspace and checked Reviewer admission
 remain tied to their separately qualified executables and configurations.
 
+The native compatibility and access-safety campaigns for Codex `0.172.0`
+used scripted loopback Responses without an account. They exercised history,
+forks, interruption, restart with unanswered approval, workspace and temporary
+writes, and file and command approvals. The Profile launch probe also passed.
+The registry pins both generated schema bundles for this release.
+
 The [CI workflow](../../.github/workflows/ci.yml) runs the same complete gate on
 the standard macOS arm64 runner for pushes and pull requests. It provisions
 the pinned tools, verifies downloaded asset digests and explicitly selects the
@@ -813,12 +819,14 @@ Profile retirement, foreground Child termination and current-main owned-root
 process census must finish before success. Failed roots, unknown effects and
 unproved absence remain explicit.
 
-Caller-scoped External and Managed owners attest `Codex >= 0.169.0` or
+New caller-scoped External and Managed owners attest `Codex >= 0.172.0` or
 `Claude >= 2.1.310` and supply the canonical executable path and SHA-256. For
 offline setup and refresh checks, use fixture executables that leave a marker
 if they run. Hash the open file and recheck its descriptor metadata before
 publishing. A retained `schema_version: 1` owner lets the fixture verify receipt
-and preparation continuity. Check that refresh changes `owner.json` and leaves
+and preparation continuity. A retained Codex v2 owner admitted at the previous
+0.169.0 floor can still load, launch and replay with its pinned executable.
+Check that refresh changes `owner.json` and leaves
 `invocations.sqlite` byte-for-byte intact.
 
 The [runtime qualification owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)

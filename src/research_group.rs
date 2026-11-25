@@ -1198,6 +1198,7 @@ fn assign_in(
             content["provisioning_ref"].as_str().ok_or_else(invalid)?,
         )
         .map_err(|_| invalid())?;
+        require_current_member_runtime(snapshot.profile_binding(), "assign_group")?;
         let candidate = snapshot.candidate(true).map_err(|_| invalid())?;
         let task: crate::task_request::SpecialistTaskRequest =
             serde_json::from_value(content["assignment"]["task_body"].clone())

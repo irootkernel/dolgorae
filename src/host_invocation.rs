@@ -1425,7 +1425,7 @@ pub(crate) mod tests {
         let drift = VerifiedOwner::load(&f.home, &f.path()).err().unwrap();
         assert_eq!(drift.code, "RECOVERY_REQUIRED");
         assert_eq!(drift.details["reason"], "host_executable_refresh_required");
-        let replacement = f.refreshed_image("0.169.1");
+        let replacement = f.refreshed_image("0.172.1");
         f.refresh(&f.path(), &replacement, false).unwrap();
         assert_eq!(std::fs::read(native_database).unwrap(), database_bytes);
         assert_ne!(std::fs::read(f.path()).unwrap(), owner_bytes);

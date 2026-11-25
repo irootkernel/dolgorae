@@ -10844,7 +10844,14 @@ pub(crate) mod tests {
             .sha256 = "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878".to_owned();
         sources.profile_binding.launch_snapshot_sha256 =
             sha256_hex(&canonical_bytes(&sources.profile_binding.launch_snapshot).unwrap());
-        let snapshot = crate::provisioning::capture_provisioning(&sources).unwrap();
+        accept_historical_install(fixture, &sources)
+    }
+
+    fn accept_historical_install(
+        fixture: &Fixture,
+        sources: &ProvisioningSources<'_>,
+    ) -> (RetainedSnapshot, ProvisioningCandidate, OperationReceipt) {
+        let snapshot = crate::provisioning::capture_provisioning(sources).unwrap();
         crate::provisioning::install_snapshot(&fixture.state_root, &snapshot).unwrap();
         let identity = intent_identity(
             &fixture.scope(),
@@ -28206,19 +28213,26 @@ pub(crate) mod tests {
             assert_eq!(port.dispatched.borrow().len(), dispatched);
         }
     }
-    // Real protected producers supply authority; the port only isolates native
-    // provisioning/settlement from these provider-owned dispatch regressions.
-    fn task084_native_fixture(
-        managed: bool,
-        count: usize,
-    ) -> (
+    type GroupFixture = (
         Fixture,
         DolgoraeHome,
         crate::controller::CredentialCarrier,
         SettlementOwner,
         FakePort,
         Value,
-    ) {
+    );
+
+    // Real protected producers supply authority; the port only isolates native
+    // provisioning/settlement from these provider-owned dispatch regressions.
+    fn task084_native_fixture(managed: bool, count: usize) -> GroupFixture {
+        task084_native_fixture_with_install(managed, count, Fixture::install)
+    }
+
+    fn task084_native_fixture_with_install(
+        managed: bool,
+        count: usize,
+        install: impl FnOnce(&Fixture) -> ProvisioningCandidate,
+    ) -> GroupFixture {
         let mut f = Fixture::new();
         let home = DolgoraeHome::from_canonical_home(f.root.clone()).unwrap();
         let workspace = f.view.canonical_path.to_path_buf().unwrap();
@@ -28285,7 +28299,7 @@ pub(crate) mod tests {
                 engagement_id: f.open(),
             }
         };
-        let installed = f.install();
+        let installed = install(&f);
         let snapshot =
             crate::provisioning::retained_snapshot(&f.state_root, &installed.provisioning_ref)
                 .unwrap();
@@ -28902,6 +28916,51 @@ pub(crate) mod tests {
             });
             assert_eq!(observe().unwrap(), expected);
             assert!(port.starts.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn group_refuses_installed_former_floor_before_receipt_or_quota() {
+        for managed in [false, true] {
+            let (f, home, carrier, owner, port, request) =
+                task084_native_fixture_with_install(managed, 1, |fixture| {
+                    let mut sources = fixture.generic_sources();
+                    sources.profile_binding.launch_snapshot.codex_version =
+                        crate::workspace::PREVIOUS_CREATION_CODEX_VERSION.into();
+                    sources.profile_binding =
+                        crate::profile::qualified_test_binding(&sources.profile_binding);
+                    assert!(
+                        sources
+                            .profile_binding
+                            .retained_qualified_runtime_supported()
+                            && !sources.profile_binding.caller_workspace_supported()
+                    );
+                    accept_historical_install(fixture, &sources).1
+                });
+            let before = f.database_bytes();
+            let refused = research_group::with_dispatch_limit(0, || {
+                research_group::public_call(
+                    &home,
+                    &f.view,
+                    &carrier,
+                    match owner {
+                        SettlementOwner::Managed { session_id } => Some(session_id),
+                        SettlementOwner::External { .. } => None,
+                    },
+                    owner.scope_kind(),
+                    owner.scope_ref(),
+                    "assign_group",
+                    Some("native-group-original"),
+                    None,
+                    &request,
+                    &port,
+                )
+            })
+            .unwrap_err();
+            assert_eq!(refused.code, "CAPABILITY_UNSUPPORTED");
+            assert_eq!(refused.details["effect"], "none");
+            assert_eq!(f.database_bytes(), before);
+            assert_eq!(port.calls(), 0);
         }
     }
 

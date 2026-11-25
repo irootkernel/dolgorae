@@ -308,7 +308,7 @@ pub(crate) mod tests {
         let owner = f.owner();
         assert!(owner.configuration.caller_scope.is_none());
         let original = std::fs::read(&owner.path).unwrap();
-        let executable = f.f.refreshed_image("0.170.0");
+        let executable = f.f.refreshed_image("0.173.0");
         assert_eq!(
             f.f.refresh(&owner.path, &executable, false)
                 .unwrap_err()
@@ -346,7 +346,7 @@ pub(crate) mod tests {
             .unwrap();
         let path = old.root.path.join(name);
         let old_bytes = std::fs::read(&path).unwrap();
-        let executable = f.refreshed_image("0.169.1");
+        let executable = f.refreshed_image("0.172.1");
         f.refresh(&f.path(), &executable, false).unwrap();
         let current = f.owner();
         assert_eq!(retained(&current, name, &request).unwrap(), Some(response));
@@ -1020,7 +1020,7 @@ pub(crate) fn bootstrap(
         .global_profile_binding
         .as_ref()
         .ok_or_else(refusal)?;
-    if !binding.caller_workspace_supported() {
+    if !binding.retained_qualified_runtime_supported() {
         return Err(refusal());
     }
     let path = owner_path(&state_root, manifest.run_id);

@@ -1166,6 +1166,10 @@ mod profile_tests {
         facts.capabilities.interactions.permission_request = "recognized_unsupported".to_owned();
         let projected = profile(&facts).unwrap();
         assert_eq!(projected.server_epoch, Some(7));
+        assert_eq!(
+            projected.compatibility,
+            pb::ProfileCompatibility::Compatible as i32
+        );
         assert_eq!(projected.models[0].supported_efforts, ["low", "high"]);
         assert_eq!(
             projected.supported_interaction_kinds,

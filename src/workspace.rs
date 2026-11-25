@@ -211,6 +211,9 @@ pub struct RuntimeProfile {
     pub native_subagents: NativeSubagents,
 }
 
+pub(crate) const MINIMUM_CREATION_CODEX_VERSION: &str = "0.172.0";
+pub(crate) const PREVIOUS_CREATION_CODEX_VERSION: &str = "0.169.0";
+
 /// Runtime version precedence ignores build metadata.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct RuntimeVersion {

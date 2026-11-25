@@ -3243,6 +3243,12 @@ Status: `PLANNED`
 
 Depends on: `TASK-096` and `TASK-097`.
 
+Raise the Codex minimum to `0.172.0` for new qualified creation and
+caller-scoped host setup or refresh. Preserve retained execution and host
+records admitted at the former floor. Register exact `0.172.0` as Profile
+`COMPATIBLE` with both schema digests and version-specific runtime evidence.
+Qualify the resulting exact H3/H4 pair.
+
 Package a superseding intended-version `v0.1.4` H3 Dolgorae candidate with zero
 wire drift against immutable `H1` (`0927cbf8...`) and
 `dolgorae-public-v2.descriptor.pb` (`c34b1da6...`) and isolated skill-package

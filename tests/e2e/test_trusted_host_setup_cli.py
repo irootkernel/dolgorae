@@ -80,7 +80,7 @@ def validate(binary: Path) -> None:
         version = command("version", "--json")["version"].removeprefix("v")
         request.write_text(json.dumps({
             "route": "codex-0.160.0",
-            "executable": host_image(private / "not-launched", "0.169.0"),
+            "executable": host_image(private / "not-launched", "0.172.0"),
             "owner": {"kind": "external"}, "controller_generation": 1,
             "controller_file": str(controller), "native_host_root": str(native),
             "allowed_scopes": [{"kind": "workspace", "reference": workspace_ref},
@@ -244,7 +244,7 @@ def validate(binary: Path) -> None:
         for case, route in (("codex-v2", "codex-0.160.0"), ("claude-v2", "claude-code-2.1.295"),
                             ("codex-v1", "codex-0.160.0")):
             legacy = case.endswith("v1")
-            floor, updated = ("2.1.310", "2.1.311") if route.startswith("claude") else ("0.169.0", "0.169.1")
+            floor, updated = ("2.1.310", "2.1.311") if route.startswith("claude") else ("0.172.0", "0.172.1")
             if case != "codex-v2":
                 fixture_owner = home / (case + "-private")
                 fixture_owner.mkdir(mode=0o700)

@@ -1342,8 +1342,11 @@ pub(super) fn campaign(
         let profile = selected.profile.as_ref().unwrap();
         assert_eq!(listed.items.iter().find(|p| p.name == "fixture-a"), Some(profile));
         assert_eq!(profile.server_key, captured.profile_binding.server_key);
-        assert_eq!(profile.compatibility, pb::ProfileCompatibility::Unverified as i32);
-        assert_eq!(profile.runtime_version.as_deref(), Some("0.169.0"));
+        assert_eq!(profile.compatibility, pb::ProfileCompatibility::Compatible as i32);
+        assert_eq!(
+            profile.runtime_version.as_deref(),
+            Some(captured.profile_binding.launch_snapshot.codex_version.as_str())
+        );
         assert!(profile.server_epoch.is_some());
         assert!(profile.blockers.is_empty());
         assert!(profile.supported_execution_lanes.contains(&(pb::ExecutionLane::Dedicated as i32)));
@@ -1363,7 +1366,7 @@ pub(super) fn campaign(
         assert!(validated.blockers.is_empty());
         fs::write(root.join("public-creation-preflight.json"), serde_json::to_vec_pretty(&json!({
             "profile": profile.name, "server_key": profile.server_key, "server_epoch": profile.server_epoch,
-            "runtime_version": profile.runtime_version, "compatibility": "unverified",
+            "runtime_version": profile.runtime_version, "compatibility": "compatible",
             "models": profile.models.iter().map(|m| json!({"model_id":m.model_id,
                 "is_default":m.is_default,"supported_efforts":m.supported_efforts})).collect::<Vec<_>>(),
             "selected_model": captured.admitted.model, "selected_effort": captured.admitted.effort,

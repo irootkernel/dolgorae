@@ -26,6 +26,11 @@
       "version": "0.166.0",
       "stable_schema_bundle_sha256": "ca83bb66f42eeb3b040f354cf3ec1b4d1e5548b2c0fb7313d367c9985b843558",
       "experimental_schema_bundle_sha256": "bbaade8274f7db039e4cbdaee07a1a8c93cba3c631c7973750aa048f1d8be48c"
+    },
+    {
+      "version": "0.172.0",
+      "stable_schema_bundle_sha256": "528ceb68ddb9a86a33722583429125437d05b848c92e8e7385b1d08f89772b2b",
+      "experimental_schema_bundle_sha256": "b701eab71549c1b944dd7968d6cbb0d4b2e8c60543bb12dd82c92c739c9e3875"
     }
   ],
   "experimental_thread_surfaces": {

@@ -12756,7 +12756,7 @@ fn acquire_writer_authorized_with_capture(
         && manifest
             .global_profile_binding
             .as_ref()
-            .is_some_and(|binding| binding.caller_workspace_supported());
+            .is_some_and(|binding| binding.retained_qualified_runtime_supported());
     if retire_reader && manifest.purpose.kind == PurposeKind::Review {
         return Err(write_forbidden(state_root, run_id));
     }
@@ -13266,7 +13266,7 @@ fn release_writer_authorized_with_lifecycle(
         && manifest
             .global_profile_binding
             .as_ref()
-            .is_some_and(|binding| binding.caller_workspace_supported())
+            .is_some_and(|binding| binding.retained_qualified_runtime_supported())
         && !externally_closed;
     let owned_lifecycle = if qualified && lifecycle.is_none() {
         Some(
@@ -13826,7 +13826,7 @@ fn resume_generation_release_inner(
         .global_profile_binding
         .as_ref()
         .ok_or_else(|| internal("release binding missing"))?;
-    if !binding.caller_workspace_supported()
+    if !binding.retained_qualified_runtime_supported()
         || manifest.execution_lane != ExecutionLane::Dedicated
         || !requires_caller_policy_proof(&manifest)
     {
@@ -24298,7 +24298,26 @@ mod tests {
 
     #[test]
     fn historical_member_release_and_close_preserve_the_accepted_binding() {
-        let fixture = super::release_fixture::ClosedMemberRun::historical();
+        assert_retained_member_release_and_close(
+            super::release_fixture::ClosedMemberRun::historical(),
+        );
+    }
+
+    #[test]
+    fn former_floor_member_release_and_close_preserve_the_accepted_binding() {
+        let fixture = super::release_fixture::ClosedMemberRun::former_creation_floor();
+        assert!(
+            fixture
+                .manifest
+                .global_profile_binding
+                .as_ref()
+                .unwrap()
+                .retained_qualified_runtime_supported()
+        );
+        assert_retained_member_release_and_close(fixture);
+    }
+
+    fn assert_retained_member_release_and_close(fixture: super::release_fixture::ClosedMemberRun) {
         let path = crate::run::run_root(&fixture.state_root, fixture.run_id).join("manifest.json");
         let before = std::fs::read(&path).unwrap();
         let binding = fixture.manifest.global_profile_binding.as_ref().unwrap();
@@ -31829,6 +31848,10 @@ pub(crate) mod release_fixture {
             Self::with_base(super::successor_fixture::SuccessorMember::historical())
         }
 
+        pub(crate) fn former_creation_floor() -> Self {
+            Self::with_base(super::successor_fixture::SuccessorMember::former_creation_floor())
+        }
+
         pub(crate) fn verified() -> Self {
             let scene = Self::new();
             crate::worker::prepare_runtime_root(
@@ -33541,6 +33564,7 @@ pub(crate) mod successor_fixture {
                 false,
                 "dedicated",
                 true,
+                crate::global_runtime::CURRENT_CODEX_VERSION,
             )
         }
 
@@ -33572,6 +33596,18 @@ pub(crate) mod successor_fixture {
             Self::with_runtime("read_only", "review", true, true)
         }
 
+        pub(crate) fn former_creation_floor() -> Self {
+            Self::with_runtime_lane_and_open(
+                "read_only",
+                "review",
+                true,
+                false,
+                "dedicated",
+                false,
+                crate::workspace::PREVIOUS_CREATION_CODEX_VERSION,
+            )
+        }
+
         fn with_options(access: &str, purpose: &str, qualified: bool) -> Self {
             Self::with_runtime(access, purpose, qualified, false)
         }
@@ -33587,7 +33623,15 @@ pub(crate) mod successor_fixture {
             historical: bool,
             lane: &str,
         ) -> Self {
-            Self::with_runtime_lane_and_open(access, purpose, qualified, historical, lane, false)
+            Self::with_runtime_lane_and_open(
+                access,
+                purpose,
+                qualified,
+                historical,
+                lane,
+                false,
+                crate::global_runtime::CURRENT_CODEX_VERSION,
+            )
         }
 
         fn with_runtime_lane_and_open(
@@ -33597,6 +33641,7 @@ pub(crate) mod successor_fixture {
             historical: bool,
             lane: &str,
             successor_open: bool,
+            creation_version: &str,
         ) -> Self {
             let root = std::env::temp_dir().join(format!("dolgorae-successor-{}", Uuid::now_v7()));
             for directory in [
@@ -33634,7 +33679,7 @@ pub(crate) mod successor_fixture {
             profile_binding.launch_snapshot.codex_version = if historical {
                 "0.159.3"
             } else {
-                crate::global_runtime::CURRENT_CODEX_VERSION
+                creation_version
             }
             .to_owned();
             profile_binding.launch_snapshot.executable_identity.sha256 = if historical {

@@ -444,7 +444,11 @@ The minimum's exact schemas remain in `pinned_runtime_schema`; additional
 verified versions are recorded in `verified_runtime_schemas`. A listed version
 reports `tested` only when the required subset and both of its exact bundle
 digests match. Registration requires the live compatibility and access-safety
-campaigns, plus the Profile launch probe, on that exact version. Specialist
+campaigns, plus the Profile launch probe, on that exact version. These campaigns
+may use scripted loopback Responses with the real app-server to exercise
+protocol and access behavior. Hosted model and real-account behavior require
+separate evidence. Codex `0.172.0`, the floor for new qualified
+creation, is registered and projects as `COMPATIBLE` in public v2. Specialist
 Review and caller-workspace admission retain their own qualification. Unlisted newer
 compatible versions report `unverified`. Generic `tested` status does not confer
 separate caller-workspace or production-runtime qualification.
@@ -1227,7 +1231,7 @@ not select either server implicitly.
 
 The [delegation runtime
 qualification](dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification)
-requires Codex CLI `0.169.0` or newer for new qualified caller-workspace
+requires Codex CLI `0.172.0` or newer for new qualified caller-workspace
 startup/policy, instruction-discovery and checked-review admissions. Admission
 precedes each new reservation, member or task acceptance and runtime launch.
 Newer versions may be attempted without registering their version or executable
@@ -1243,9 +1247,10 @@ ValidateProvisioning before creation. They must refuse incompatible runtimes and
 concrete provisioning blockers without requiring per-version approval.
 
 Original-key replay, release, closure and recovery retain the accepted binding,
-including qualified 0.159.3, 0.164.0 and 0.167.2 records. Existing snapshots are
-never resealed. Actual executable and process identities remain checked against
-that binding. Fresh caller-workspace and Orchestrated Session `StartRun`,
+including qualified 0.159.3, 0.164.0, 0.167.2 and records admitted under the
+previous 0.169.0 minimum. Existing snapshots are never resealed. Actual
+executable and process identities remain checked against that binding.
+Fresh caller-workspace and Orchestrated Session `StartRun`,
 qualified external and brokered Specialist typed `StartRun`, Specialist Review
 MCP adapter preparation, and fresh CLI `specialist review` can roll over a
 quiescent singleton. The incumbent must be `ready` on the same canonical

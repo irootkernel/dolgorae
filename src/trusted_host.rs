@@ -620,7 +620,13 @@ fn validate_draft(
         caller.validate().map_err(|_| refusal())?;
         match schema_version {
             1 if draft.route.matches_legacy(&draft.executable) => {}
-            2 => draft.route.require_supported(&draft.executable)?,
+            2 => {
+                let minimum = match draft.route {
+                    HostRoute::Codex => crate::workspace::PREVIOUS_CREATION_CODEX_VERSION,
+                    HostRoute::Claude => draft.route.minimum_version(),
+                };
+                require_attested_executable(&draft.executable, minimum)?;
+            }
             _ => return Err(refusal()),
         }
     } else if schema_version != 1 || !matches!(draft.owner, OwnerKind::Managed { .. }) {
@@ -719,7 +725,7 @@ pub(crate) fn authenticate_owner(
                 .ok_or_else(refusal)?;
             let expected_root =
                 crate::run::run_root(state_root, session_ref).join("native-specialist");
-            if !runtime.caller_workspace_supported()
+            if !runtime.retained_qualified_runtime_supported()
                 || draft.route != HostRoute::Codex
                 || draft.executable.path
                     != Path::new(&runtime.launch_snapshot.executable_identity.resolved_path)
@@ -916,6 +922,7 @@ pub(crate) fn create_owner(
     } else {
         validate_draft(&root, &view, &draft, schema_version)?;
         if schema_version == 2 {
+            require_attested_executable(&draft.executable, draft.route.minimum_version())?;
             Some(crate::host_invocation::verify_executable(
                 &draft.executable,
             )?)
@@ -1013,7 +1020,7 @@ fn refresh_executable(
     if owner.configuration.caller_scope.is_none() {
         return Err(refusal());
     }
-    owner.configuration.route.require_supported(&executable)?;
+    require_attested_executable(&executable, owner.configuration.route.minimum_version())?;
     if !allow_downgrade
         && attested_version(&executable.version)?
             < attested_version(&owner.configuration.executable.version)?
@@ -1380,7 +1387,7 @@ impl HostRoute {
 
     fn minimum_version(self) -> &'static str {
         match self {
-            Self::Codex => "0.169.0",
+            Self::Codex => crate::workspace::MINIMUM_CREATION_CODEX_VERSION,
             Self::Claude => "2.1.310",
         }
     }
@@ -1402,16 +1409,19 @@ impl HostRoute {
             ),
         }
     }
+}
 
-    fn require_supported(self, executable: &HostExecutable) -> Result<(), MachineError> {
-        if executable.path.is_absolute()
-            && is_digest(&format!("sha256:{}", executable.sha256))
-            && attested_version(&executable.version)? >= attested_version(self.minimum_version())?
-        {
-            Ok(())
-        } else {
-            Err(refusal())
-        }
+fn require_attested_executable(
+    executable: &HostExecutable,
+    minimum: &str,
+) -> Result<(), MachineError> {
+    if executable.path.is_absolute()
+        && is_digest(&format!("sha256:{}", executable.sha256))
+        && attested_version(&executable.version)? >= attested_version(minimum)?
+    {
+        Ok(())
+    } else {
+        Err(refusal())
     }
 }
 
@@ -2462,7 +2472,7 @@ pub(crate) mod tests {
     #[test]
     fn caller_scoped_setup_and_refresh_use_attestation_on_both_routes() {
         for (route, recent, below_floor) in [
-            (HostRoute::Codex, "0.170.0-rc.10+installer", "0.169.0-rc.1"),
+            (HostRoute::Codex, "0.173.0-rc.10+installer", "0.172.0-rc.1"),
             (HostRoute::Claude, "2.1.311+installer", "2.1.310-rc.1"),
         ] {
             for managed in [false, true] {
@@ -2517,6 +2527,49 @@ pub(crate) mod tests {
         f.draft.caller_scope = None;
         assert!(f.create().is_err());
         assert!(!f.path().exists());
+    }
+
+    #[test]
+    fn retained_caller_scoped_codex_owner_loads_below_the_new_floor() {
+        for managed in [false, true] {
+            let mut f = Fixture::new(HostRoute::Codex);
+            if managed {
+                f = prepared_managed_fixture(f);
+            }
+            f.complete();
+            let original = f.owner();
+            let StoredOwner::V2(mut old) = original.record else {
+                panic!("caller-scoped setup must publish v2");
+            };
+            // Recreate the byte shape published when this version was eligible.
+            old.executable_binding.executable.version = "0.169.0".into();
+            f.draft.executable.version = "0.169.0".into();
+            let retained_bytes = canonical(&StoredOwner::V2(old)).unwrap();
+            fs::write(f.path(), &retained_bytes).unwrap();
+
+            assert_eq!(
+                f.owner().configuration_digest,
+                original.configuration_digest
+            );
+            f.create().unwrap();
+            let store = f.ready();
+            assert!(store.launch_recipe().is_ok());
+            drop(store);
+
+            let refused = f.refreshed_image("0.171.9");
+            assert_eq!(
+                f.refresh(&f.path(), &refused, true).unwrap_err().code,
+                "RECOVERY_REQUIRED"
+            );
+            assert_eq!(fs::read(f.path()).unwrap(), retained_bytes);
+            let replacement = f.refreshed_image("0.172.0");
+            f.refresh(&f.path(), &replacement, false).unwrap();
+            assert_eq!(f.owner().configuration.executable, replacement);
+            assert_eq!(
+                f.owner().configuration_digest,
+                original.configuration_digest
+            );
+        }
     }
 
     #[test]
@@ -2595,7 +2648,7 @@ pub(crate) mod tests {
         let owner = f.owner();
         let _lock = owner.root.lock().unwrap();
         let old = fs::read(f.path()).unwrap();
-        let new = f.refreshed_image("0.169.1");
+        let new = f.refreshed_image("0.172.1");
         let (descriptor, pinned) = crate::host_invocation::verify_executable(&new).unwrap();
         let stage = owner.root.path.join("owner.json.pending");
         let staged = b"unpublished candidate";

@@ -535,7 +535,7 @@ hook/delivery/lookup never complete missing setup. Host installation, configurat
 changes and actual host execution still require their own authorization.
 
 For a new caller-scoped External or Managed owner, supply the attested version,
-SHA-256, and physical absolute executable path. The minimum is Codex `0.169.0`
+SHA-256, and physical absolute executable path. The minimum is Codex `0.172.0`
 or Claude Code `2.1.310` for the selected route. Historical TASK-077 results
 remain tied to the exact Codex `0.164.0` and Claude Code `2.1.310` hashes in the
 [runtime qualification owner](../specs/dolgorae-v014-delegation-runtime.md#current-host-and-profile-runtime-qualification).
@@ -551,7 +551,9 @@ dolgorae __trusted-specialist-host owner-executable-refresh --owner-config PRIVA
 The private request is a JSON object with `path`, `version`, and `sha256` for the
 replacement executable. The command verifies it without launching it and can
 run after the old binary has been overwritten. For a lower SemVer version,
-provide `--allow-downgrade`. The route minimum still applies.
+provide `--allow-downgrade`. The current route minimum still applies. Retained
+Codex v2 owners admitted at the former 0.169.0 floor can continue using their
+exact recorded executable.
 
 Refresh requires an initialized HostStore, exclusive `host.lock`, and a private
 root free of staging files, SQLite sidecars, and `*.pending` files. Reconcile
@@ -563,7 +565,7 @@ existing receipts. Managed owners bound directly to a root Run refuse refresh.
 
 Generic Profile doctor probes,
 start/restart/stop and migration retain tested/unverified compatibility
-admission; new qualified-mechanism admissions require Codex 0.169.0 or newer
+admission. New qualified-mechanism admissions require Codex 0.172.0 or newer
 without per-version or hash registration. Fresh eligible starts can roll over a
 quiescent Profile Server to a same-or-newer version. Untested versions remain
 unverified and actual schema, configuration, model, effort, lane and

@@ -1056,7 +1056,7 @@ mod tests {
         assert_eq!(retained.members[0].member_ref, scene.member.to_string());
         let database = old.root.path.join("invocations.sqlite");
         let bytes = fs::read(&database).unwrap();
-        let executable = scene.f.refreshed_image("0.169.1");
+        let executable = scene.f.refreshed_image("0.172.1");
         fs::remove_file(&old.configuration.executable.path).unwrap();
         scene
             .f

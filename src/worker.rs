@@ -1273,7 +1273,7 @@ impl QualifiedCallerRuntime {
             .global_profile_binding
             .as_ref()
             .ok_or(WorkerProtocolError::InvalidRuntimeRecord)?;
-        if !binding.caller_workspace_supported() {
+        if !binding.retained_qualified_runtime_supported() {
             return Ok(());
         }
         let catalog_bytes =
@@ -8926,7 +8926,7 @@ impl WorkerSession {
                 || manifest
                     .global_profile_binding
                     .as_ref()
-                    .is_none_or(|b| !b.caller_workspace_supported())
+                    .is_none_or(|b| !b.retained_qualified_runtime_supported())
             {
                 return Err(WorkerProtocolError::InvalidRuntimeRecord);
             }

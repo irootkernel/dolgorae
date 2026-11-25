@@ -7,8 +7,9 @@ use crate::machine::MachineError;
 use crate::paths::DolgoraeHome;
 use crate::profile::{CompatibilityVerdict, ExecutableIdentity, ProfileSnapshot, ServerState};
 use crate::workspace::{
-    RuntimeProfile, SystemWorkspacePlatform, atomic_create, create_directory,
-    open_secure_file_if_present, sync_directory, verify_secure_directory,
+    MINIMUM_CREATION_CODEX_VERSION, PREVIOUS_CREATION_CODEX_VERSION, RuntimeProfile,
+    SystemWorkspacePlatform, atomic_create, create_directory, open_secure_file_if_present,
+    sync_directory, verify_secure_directory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,12 +21,18 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub(crate) const MINIMUM_CREATION_CODEX_VERSION: &str = "0.169.0";
-
 pub(crate) fn creation_version_supported(version: &str) -> bool {
+    version_supported(version, MINIMUM_CREATION_CODEX_VERSION)
+}
+
+pub(crate) fn retained_qualified_version_supported(version: &str) -> bool {
+    version_supported(version, PREVIOUS_CREATION_CODEX_VERSION)
+}
+
+fn version_supported(version: &str, minimum: &str) -> bool {
     matches!(
         (crate::profile::parse_version("runtime_admission", version),
-         crate::profile::parse_version("runtime_admission", MINIMUM_CREATION_CODEX_VERSION)),
+         crate::profile::parse_version("runtime_admission", minimum)),
         (Ok(actual), Ok(minimum)) if actual >= minimum
     )
 }
@@ -400,7 +407,8 @@ impl GlobalProfileBinding {
     /// New admission permits untested newer runtimes after the normal protocol
     /// probes. Actual process, socket and configuration evidence stays Worker-owned.
     pub(crate) fn caller_workspace_supported(&self) -> bool {
-        self.current_runtime_eligible() && self.uses_qualified_launch_policy()
+        creation_version_supported(&self.launch_snapshot.codex_version)
+            && self.qualified_binding_supported()
     }
 
     pub(crate) fn uses_qualified_launch_policy(&self) -> bool {
@@ -419,16 +427,21 @@ impl GlobalProfileBinding {
             .is_ok()
     }
 
-    fn current_runtime_eligible(&self) -> bool {
+    fn qualified_binding_supported(&self) -> bool {
         self.validate_for_recovery().is_ok()
-            && creation_version_supported(&self.launch_snapshot.codex_version)
             && self.launch_snapshot.compatibility_verdict != CompatibilityVerdict::Rejected
+            && self.uses_qualified_launch_policy()
+    }
+
+    pub(crate) fn retained_qualified_runtime_supported(&self) -> bool {
+        retained_qualified_version_supported(&self.launch_snapshot.codex_version)
+            && self.qualified_binding_supported()
     }
 
     /// Retained execution uses its immutable accepted binding, without resolving
     /// the current registry or transferring qualification between executables.
     pub(crate) fn accepted_caller_workspace_supported(&self) -> bool {
-        self.caller_workspace_supported()
+        self.retained_qualified_runtime_supported()
             || (self.validate_for_recovery().is_ok()
                 && self.launch_snapshot.codex_version == "0.167.2"
                 && self.launch_snapshot.executable_identity.sha256
@@ -2441,20 +2454,30 @@ mod tests {
         let old = "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878";
         let previous = "d8990e3ee7acfbc26f91265b12a1a83f0fee40d0e0f8f1f40a37d4ec21f499cf";
         let current = CURRENT_CODEX_SHA256;
-        for version in [
-            "0.158.0",
-            "0.159.3",
-            "0.164.0",
-            "0.167.2",
-            "0.168.9",
-            CURRENT_CODEX_VERSION,
-            "0.169.0-rc.1",
-            "0.169.0+build.01",
-            "0.170.0-alpha.1",
-            "0.170.0",
-            "1.0.0",
-            "not-a-version",
+        for (version, eligible, retained) in [
+            ("0.158.0", false, false),
+            ("0.159.3", false, false),
+            ("0.164.0", false, false),
+            ("0.167.2", false, false),
+            ("0.168.9", false, false),
+            ("0.169.0-rc.1", false, false),
+            ("0.169.0", false, true),
+            ("0.169.0+build.01", false, true),
+            ("0.170.0-alpha.1", false, true),
+            ("0.171.9", false, true),
+            ("0.172.0-rc.1", false, true),
+            (CURRENT_CODEX_VERSION, true, true),
+            ("0.172.0+build.01", true, true),
+            ("0.173.0", true, true),
+            ("1.0.0", true, true),
+            ("not-a-version", false, false),
         ] {
+            assert_eq!(creation_version_supported(version), eligible, "{version}");
+            assert_eq!(
+                retained_qualified_version_supported(version),
+                retained,
+                "{version}"
+            );
             for sha in [
                 old,
                 previous,
@@ -2479,7 +2502,6 @@ mod tests {
                     "expected_output":"structured_review_v4","deadline_seconds":60,"role":null
                 })).unwrap();
                 let admission = false; // Generic construction is never qualified admission.
-                let eligible = creation_version_supported(version);
                 let accepted = (version == "0.167.2"
                     && sha == "97bc82fd46f117cf10efb95e6ff0c81dc4784f5797bcdc2cb75093ba09e4def0")
                     || (version == "0.164.0" && sha == previous)
@@ -2536,14 +2558,15 @@ mod tests {
                     "{version}/{sha}"
                 );
                 let checked = eligible && !version.contains(['-', '+']);
+                let retained_checked = retained && !version.contains(['-', '+']);
                 assert_eq!(review.admit_profile(&qualified).is_ok(), checked);
                 assert_eq!(
                     qualified.accepted_checked_review_supported(),
-                    checked || accepted
+                    retained_checked || accepted
                 );
                 assert_eq!(
                     qualified.accepted_caller_workspace_supported(),
-                    eligible || accepted
+                    retained || accepted
                 );
                 assert_eq!(
                     qualified.launch_snapshot.compatibility_verdict,
@@ -2552,11 +2575,13 @@ mod tests {
                 let mut changed_identity = qualified.clone();
                 changed_identity.launch_snapshot.executable_identity.sha256 = "c".repeat(64);
                 assert!(!changed_identity.caller_workspace_supported());
+                assert!(!changed_identity.retained_qualified_runtime_supported());
                 let mut rejected = qualified.clone();
                 rejected.launch_snapshot.compatibility_verdict = CompatibilityVerdict::Rejected;
                 rejected.launch_snapshot_sha256 =
                     canonical_digest(&rejected.launch_snapshot).unwrap();
                 assert!(!rejected.caller_workspace_supported());
+                assert!(!rejected.retained_qualified_runtime_supported());
                 assert_ne!(qualified.server_key, binding.server_key);
                 assert_eq!(
                     binding.launch_snapshot.disabled_features,

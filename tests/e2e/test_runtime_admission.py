@@ -43,7 +43,7 @@ def fixture_root(binary: Path):
 def validate(binary: Path) -> None:
     schema_source = native_codex.installed_codex()
     # These are offline boundary fixtures, not qualification of old runtimes.
-    for version in ("0.168.8", "0.168.9"):
+    for version in ("0.169.0", "0.171.9", "0.172.0-rc.1"):
         with fixture_root(binary) as root:
             home, workspace, profile_home, bin_root = (root / name for name in
                                                       ("home", "workspace", "profile", "bin"))
@@ -74,7 +74,7 @@ def validate(binary: Path) -> None:
             set_mode(fake, version=version)
             call("profile", "add", "fixture", *add_arguments(profile_home, fake))
             doctor = call("profile", "doctor", "fixture")["data"]
-            assert doctor["compatibility"] == ("tested" if tuple(map(int, version.split("."))) in native_codex.TESTED_CODEX_VERSIONS else "unverified")
+            assert doctor["compatibility"] == "unverified"
             call("profile", "doctor", "fixture", "--launch-probe")
             key = doctor["server_key"]
             state_root = home / ".dolgorae/workspaces" / workspace_id
@@ -197,8 +197,9 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
         call("controller", "credential", "create", "--kind", "automation", "--instance-id",
              "rollover-fixture", "--output", str(owner))
         fake, fault = bin_root / "codex", fault_bin / "codex"
-        for name, executable, version in (("fixture", fake, "0.169.0"),
-                                          ("fault", fault, "0.171.1")):
+        # Synthetic versions use the configured schema source without taking its verified version.
+        for name, executable, version in (("fixture", fake, "0.172.1"),
+                                          ("fault", fault, "0.174.1")):
             create_fake_codex(executable, schema_source, profile_home)
             set_mode(executable, version=version)
             call("profile", "add", name, *add_arguments(profile_home, executable))
@@ -284,16 +285,16 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
                         raise
 
         typed_fixture("rollover-fixture", "former-manifest", "--profile", "fixture")
-        former = ready("0.169.0")
+        former = ready("0.172.1")
         start_run("fixture", "manifest-only-rollover", "COMPATIBILITY_REJECTED")
-        first = ready("0.169.0")
-        assert committed(former, "0.169.0") == first
+        first = ready("0.172.1")
+        assert committed(former, "0.172.1") == first
         record = read(migration_path)
         for field in ("version", "executable_sha256", "schema_sha256"):
             assert record["old_" + field] == record["new_" + field], record
         assert record["old_manifest_sha256"] != record["new_manifest_sha256"], record
 
-        set_mode(fake, version="0.169.1")
+        set_mode(fake, version="0.172.2")
         updated = call("profile", "doctor", "fixture")["server_key"]
         call("profile", "doctor", "fixture", "--launch-probe", error="PROFILE_LAUNCH_CONFLICT")
         call("profile", "server", "start", "fixture", "--confirm-server-key", updated,
@@ -302,7 +303,7 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
                       error="PROFILE_LAUNCH_CONFLICT")
         typed_fixture("rollover-fixture", "retained-successor", "--profile", "fixture",
                       error="PROFILE_LAUNCH_CONFLICT")
-        assert ready("0.169.0") == first and read(migration_path) == record
+        assert ready("0.172.1") == first and read(migration_path) == record
 
         profile_root = state_path(first["server_key"]).parent
         member = "01900000-0000-7000-8000-000000000080"
@@ -314,17 +315,17 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
         (member_root / "manifest.json").unlink()
         member_root.rmdir()
         specialist_start("brokered", "orphan-member-fence", "PROFILE_SERVER_BUSY")
-        assert ready("0.169.0") == first and read(migration_path) == record
+        assert ready("0.172.1") == first and read(migration_path) == record
         append_membership(profile_root, "run_closed", member_workspace, member, first["server_epoch"])
         member_root.parent.rmdir()
         member_root.parent.parent.rmdir()
 
         rejected = start_run("fixture", "new-caller-rollover", "COMPATIBILITY_REJECTED")
         assert rejected["details"]["check"] == "model", rejected
-        second = committed(first, "0.169.1")
+        second = committed(first, "0.172.2")
         assert not list(run_root.glob("*"))
 
-        set_mode(fake, version="0.169.0")
+        set_mode(fake, version="0.172.1")
         for refused in (
             start_run("fixture", "qualified-downgrade", "PROFILE_MIGRATION_REQUIRED"),
             call("profile", "server", "start", "fixture", error="PROFILE_MIGRATION_REQUIRED"),
@@ -333,18 +334,18 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
         ):
             assert refused["details"]["drift_fields"] == ["codex_version"], refused
             assert refused["details"]["previous_server_key"] == second["server_key"], refused
-        assert ready("0.169.1") == second
+        assert ready("0.172.2") == second
 
         # An explicit Operator stop clears the conflict for the pre-policy binding.
-        set_mode(fake, version="0.169.1")
+        set_mode(fake, version="0.172.2")
         call("profile", "server", "stop", "fixture", "--operator-file", str(operator),
              "--confirm-server-key", second["server_key"])
-        set_mode(fake, version="0.169.0")
+        set_mode(fake, version="0.172.1")
         underlying = typed_fixture("rollover-fixture", "retained-legacy", "--profile", "fixture")
-        resumed = ready("0.169.0")
+        resumed = ready("0.172.1")
         assert resumed["server_key"] == underlying["server_key"] != first["server_key"]
 
-        set_mode(fake, version="0.170.0")
+        set_mode(fake, version="0.173.0")
         frames = [
             ("initialize", {"protocolVersion": "2026-07-28"}),
             ("tools/list", {}),
@@ -361,11 +362,11 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
         assert initialized["result"]["protocolVersion"] == "2026-07-28", initialized
         assert advertised["result"]["tools"] == [], advertised
         assert unavailable["error"]["data"]["code"] == "MCP_REVIEW_UNAVAILABLE", unavailable
-        third = committed(resumed, "0.170.0")
+        third = committed(resumed, "0.173.0")
         current = third
         for carrier, version, reference in (
-            ("external", "0.170.1", "01900000-0000-7000-8000-000000000090"),
-            ("brokered", "0.170.2", "01900000-0000-7000-8000-000000000094"),
+            ("external", "0.173.1", "01900000-0000-7000-8000-000000000090"),
+            ("brokered", "0.173.2", "01900000-0000-7000-8000-000000000094"),
         ):
             gate = root / (carrier + "-gate")
             set_mode(fake, version=version, startup_gate=gate)
@@ -467,7 +468,7 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
             finally:
                 fixture_request.unlink()
 
-        set_mode(fake, version="0.170.3")
+        set_mode(fake, version="0.173.3")
         alias = "fixture-removed"
         call("profile", "add", alias, *add_arguments(profile_home, fake))
         reference = "01900000-0000-7000-8000-000000000081"
@@ -485,7 +486,7 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
             # The product CLI commits the replacement before it rejects the empty Git target.
             review_failure = call(*review_args(reference, "fixture"), stdin=request,
                                   error="REVIEW_TARGET_UNAVAILABLE")
-            fourth = committed(current, "0.170.3")
+            fourth = committed(current, "0.173.3")
             assert fourth["server_key"] == prepared["requested_key"], fourth
             winner_path = state_path(fourth["server_key"])
             winner_bytes = winner_path.read_bytes()
@@ -532,7 +533,7 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
         # A separate executable lets the failed candidate and rollback source have
         # independent startup outcomes in the same canonical Codex home.
         fault_gate = root / "fault-gate"
-        set_mode(fault, version="0.171.1", startup_gate=fault_gate, startup_fail=True)
+        set_mode(fault, version="0.174.1", startup_gate=fault_gate, startup_fail=True)
         fault_ref = "01900000-0000-7000-8000-000000000082"
 
         def reserved() -> None:
@@ -551,7 +552,7 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
             assert child.returncode and not stderr, (stdout, stderr)
             failed = json.loads(stdout)["error"]
         assert failed["code"] == "TRANSPORT_FAILURE", failed
-        rolled_back = ready("0.170.3")
+        rolled_back = ready("0.173.3")
         record = read(migration_path)
         assert record["phase"] == "rolled_back" and record["old_server_key"] == rolled_back["server_key"], record
         assert rolled_back["server_key"] == fourth["server_key"] and rolled_back["server_epoch"] > fourth["server_epoch"]
@@ -559,7 +560,7 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
         assert all(read(path)["owner"]["request_ref"] != fault_ref for path in
                    (state_path(rolled_back["server_key"]).parent / "review-owners").glob("*.json"))
 
-        set_mode(fault, version="0.171.1")
+        set_mode(fault, version="0.174.1")
         temp_ref = "01900000-0000-7000-8000-000000000083"
         call(*review_args(temp_ref, "fault"), "--temporary-server", stdin=request, error=review_failure["code"])
         record = read(migration_path)
@@ -570,9 +571,9 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
         assert not list(run_root.glob("*"))
 
         call("profile", "server", "start", "fixture")
-        stopped = ready("0.170.3")
-        set_mode(fake, version="0.170.3", startup_fail=True)
-        set_mode(fault, version="0.171.1", startup_fail=True)
+        stopped = ready("0.173.3")
+        set_mode(fake, version="0.173.3", startup_fail=True)
+        set_mode(fault, version="0.174.1", startup_fail=True)
         blocked_ref = "01900000-0000-7000-8000-000000000085"
         call(*review_args(blocked_ref, "fault"), stdin=request, error="TRANSPORT_FAILURE")
         blocked = read(migration_path)
@@ -588,11 +589,11 @@ def validate_rollover(binary: Path, schema_source: Path) -> None:
 
         # Crash the isolated CLI during its first probe, after detached process
         # registration but before it has committed review ownership as ready.
-        set_mode(fake, version="0.170.3")
+        set_mode(fake, version="0.173.3")
         call("profile", "server", "start", "fixture")
         crash_ref = "01900000-0000-7000-8000-000000000084"
         crash_gate = root / "crash-gate"
-        set_mode(fault, version="0.171.1", probe_gate=crash_gate)
+        set_mode(fault, version="0.174.1", probe_gate=crash_gate)
         with startup_barrier([str(binary), *review_args(crash_ref, "fault"), "--temporary-server"],
                              env, crash_gate, request) as child:
             record = read(migration_path)

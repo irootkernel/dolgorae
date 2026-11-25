@@ -446,7 +446,7 @@ pub fn retire_qualified_global_server(
     carrier: &crate::controller::CredentialCarrier,
 ) -> Result<bool, MachineError> {
     binding.validate_for_recovery()?;
-    if !binding.caller_workspace_supported() {
+    if !binding.retained_qualified_runtime_supported() {
         return Err(internal("retirement requires an exact qualified binding"));
     }
     let home = DolgoraeHome::system()?;
@@ -1431,7 +1431,7 @@ fn select_confirmed_lifecycle_binding(
         return Err(profile_mismatch(
             name,
             "qualified_current_runtime",
-            json!({"minimum_codex_version":crate::global_runtime::MINIMUM_CREATION_CODEX_VERSION}),
+            json!({"minimum_codex_version":crate::workspace::MINIMUM_CREATION_CODEX_VERSION}),
             json!({"codex_version":qualified.launch_snapshot.codex_version,"executable_sha256":qualified.launch_snapshot.executable_identity.sha256}),
         ));
     }
@@ -3395,30 +3395,33 @@ fn observe_registered_profile(
     definition: &RuntimeProfile,
 ) -> Result<ProfileObservation, MachineError> {
     let snapshot = observe_snapshot_reused(context, name, definition)?;
-    let qualified = if crate::global_runtime::creation_version_supported(&snapshot.codex_version) {
-        // Display-only derivation reuses checked probe facts. Admission still
-        // performs fresh preparation and records its own immutable binding.
-        Some(snapshot_from_probes(
-            context,
-            name,
-            definition,
-            SnapshotProbes {
-                canonical_executable: PathBuf::from(&snapshot.executable_identity.resolved_path),
-                canonical_codex_home: snapshot.canonical_codex_home.clone(),
-                executable_identity: snapshot.executable_identity.clone(),
-                version: snapshot.codex_version.clone(),
-                schema_bundle_sha256: snapshot.schema_bundle_sha256.clone(),
-                verdict: snapshot.compatibility_verdict,
-                configuration: ConfigurationSnapshot {
-                    launch: snapshot.process_static_configuration.clone(),
-                    observation: snapshot.initial_configuration_observation.clone(),
+    let qualified =
+        if crate::global_runtime::retained_qualified_version_supported(&snapshot.codex_version) {
+            // Display-only derivation reuses checked probe facts. Admission still
+            // performs fresh preparation and records its own immutable binding.
+            Some(snapshot_from_probes(
+                context,
+                name,
+                definition,
+                SnapshotProbes {
+                    canonical_executable: PathBuf::from(
+                        &snapshot.executable_identity.resolved_path,
+                    ),
+                    canonical_codex_home: snapshot.canonical_codex_home.clone(),
+                    executable_identity: snapshot.executable_identity.clone(),
+                    version: snapshot.codex_version.clone(),
+                    schema_bundle_sha256: snapshot.schema_bundle_sha256.clone(),
+                    verdict: snapshot.compatibility_verdict,
+                    configuration: ConfigurationSnapshot {
+                        launch: snapshot.process_static_configuration.clone(),
+                        observation: snapshot.initial_configuration_observation.clone(),
+                    },
                 },
-            },
-            true,
-        )?)
-    } else {
-        None
-    };
+                true,
+            )?)
+        } else {
+            None
+        };
     select_registered_profile_observation(context, snapshot, qualified, |candidate| {
         observe_profile_snapshot(context, name, candidate)
     })
@@ -4205,6 +4208,16 @@ fn verify_exact_bundle_digests(
     else {
         return Ok(());
     };
+    let actual_experimental = directory_sha256(profile_name, &root.join("experimental"))?;
+    check_bundle_digests(profile_name, &pinned, stable_digest, &actual_experimental)
+}
+
+fn check_bundle_digests(
+    profile_name: &str,
+    pinned: &Value,
+    stable_digest: &str,
+    experimental_digest: &str,
+) -> Result<(), MachineError> {
     let expected_stable = pinned["stable_schema_bundle_sha256"]
         .as_str()
         .ok_or_else(|| {
@@ -4223,8 +4236,7 @@ fn verify_exact_bundle_digests(
                 "manifest experimental bundle digest is missing",
             )
         })?;
-    let actual_experimental = directory_sha256(profile_name, &root.join("experimental"))?;
-    if stable_digest != expected_stable || actual_experimental != expected_experimental {
+    if stable_digest != expected_stable || experimental_digest != expected_experimental {
         return Err(compatibility(
             profile_name,
             "schema_bundle_digest",
@@ -8787,20 +8799,42 @@ mod tests {
             version_verdict("default", "0.158.1").unwrap(),
             CompatibilityVerdict::Unverified
         );
-        for version in ["0.166.0", "0.166.00"] {
+        for version in ["0.166.0", "0.166.00", "0.172.0"] {
             assert_eq!(
                 version_verdict("default", version).unwrap(),
                 CompatibilityVerdict::Tested
             );
         }
-        assert_eq!(
-            version_verdict("default", "0.166.1").unwrap(),
-            CompatibilityVerdict::Unverified
-        );
+        for version in ["0.166.1", "0.172.0-rc.1", "0.172.0+local", "0.172.1"] {
+            assert_eq!(
+                version_verdict("default", version).unwrap(),
+                CompatibilityVerdict::Unverified
+            );
+        }
         assert_eq!(
             version_verdict("default", "0.153.4").unwrap_err().code,
             "COMPATIBILITY_REJECTED"
         );
+    }
+
+    #[test]
+    fn codex_172_0_requires_each_exact_bundle_digest() {
+        let version = "0.172.0";
+        let pinned = tested_runtime_schema(
+            "default",
+            version,
+            &parse_version("default", version).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        let stable = "528ceb68ddb9a86a33722583429125437d05b848c92e8e7385b1d08f89772b2b";
+        let experimental = "b701eab71549c1b944dd7968d6cbb0d4b2e8c60543bb12dd82c92c739c9e3875";
+        check_bundle_digests("default", &pinned, stable, experimental).unwrap();
+        for (stable, experimental) in [("modified", experimental), (stable, "modified")] {
+            let error = check_bundle_digests("default", &pinned, stable, experimental).unwrap_err();
+            assert_eq!(error.code, "COMPATIBILITY_REJECTED");
+            assert_eq!(error.details["check"], "schema_bundle_digest");
+        }
     }
 
     #[test]
