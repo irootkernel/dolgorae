@@ -39,7 +39,7 @@ use crate::types::{
     TurnAccepted, WaitMode, WaitSessionsRequest, WaitSessionsResponse, WriterLease, now_rfc3339,
 };
 
-const LIVE_BROADCAST_CAPACITY: usize = 256;
+const MIN_BROADCAST_CAPACITY: usize = 4;
 
 type LiveAnswerHandle = (Arc<Box<dyn DriverSession>>, Arc<tokio::sync::Mutex<()>>);
 
@@ -158,10 +158,14 @@ impl Drop for EngineInner {
 
 impl EngineInner {
     fn broadcast_sender(&self, session_id: &str) -> broadcast::Sender<SessionEvent> {
+        let cap = self
+            .config
+            .event_broadcast_capacity
+            .max(MIN_BROADCAST_CAPACITY);
         let mut guard = self.channels.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .entry(session_id.to_owned())
-            .or_insert_with(|| broadcast::channel(LIVE_BROADCAST_CAPACITY).0)
+            .or_insert_with(|| broadcast::channel(cap).0)
             .clone()
     }
 
@@ -792,6 +796,28 @@ impl CoreEngine {
         }
         self.inner.wait_notify.notify_waiters();
         Ok(snap)
+    }
+
+    /// Gracefully detaches all live driver sessions on daemon shutdown (SIGINT/SIGTERM),
+    /// closing driver processes (PGID teardown) while transitioning active sessions
+    /// to resumable `Idle` state (bumping `session_generation`, revoking tokens,
+    /// expiring pending interactions, and releasing writer leases).
+    pub async fn shutdown_all_sessions(&self) {
+        let drained: Vec<(String, LiveSession)> = {
+            let mut guard = self
+                .inner
+                .live_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.drain().collect()
+        };
+
+        for (sid, live) in drained {
+            live.drain_handle.abort();
+            let _ = live.driver_session.close().await;
+            let _ = self.inner.store.detach_session_on_shutdown(&sid).await;
+        }
+        self.inner.wait_notify.notify_waiters();
     }
 
     /// Submits a new turn to an active session, rejecting concurrent active
@@ -1963,15 +1989,18 @@ fn build_scoped_mcp_injection(
         "DOLGORAE_ROOT_SESSION_ID".to_owned(),
         root_session_id.to_owned(),
     );
+    let mut args = vec!["mcp".to_owned(), "--scoped".to_owned()];
     if let Some(sock) = socket_path
         && let Some(s) = sock.to_str()
     {
         env.insert("DOLGORAE_SOCKET".to_owned(), s.to_owned());
+        args.push("--socket".to_owned());
+        args.push(s.to_owned());
     }
     McpServerInjection {
         name: "dolgorae".to_owned(),
         command: bin_path.to_path_buf(),
-        args: vec!["mcp".to_owned(), "--scoped".to_owned()],
+        args,
         env,
     }
 }

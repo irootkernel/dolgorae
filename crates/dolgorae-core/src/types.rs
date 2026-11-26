@@ -556,6 +556,7 @@ pub enum ReplayResult {
 pub struct CoreConfig {
     pub home_dir: PathBuf,
     pub max_retained_events_per_session: u64,
+    pub event_broadcast_capacity: usize,
     pub mcp_bin_path: Option<PathBuf>,
     pub socket_path: Option<PathBuf>,
 }
@@ -565,6 +566,7 @@ impl CoreConfig {
         Self {
             home_dir,
             max_retained_events_per_session: DEFAULT_MAX_RETAINED_EVENTS,
+            event_broadcast_capacity: 256,
             mcp_bin_path: None,
             socket_path: None,
         }

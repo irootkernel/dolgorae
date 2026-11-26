@@ -706,6 +706,94 @@ impl Store {
         .await
     }
 
+    /// Gracefully detaches a live session on daemon shutdown (SIGINT/SIGTERM):
+    /// transitions `Active` -> `Idle` (resumable!), marks running turns
+    /// `interrupted_unknown`, expires pending interactions with durable
+    /// `interaction_expired` events, bumps `session_generation`, revokes active
+    /// actor tokens, releases writer leases, and appends `session_recovered`.
+    pub(crate) async fn detach_session_on_shutdown(
+        &self,
+        session_id: &str,
+    ) -> Result<(SessionSnapshot, Vec<SessionEvent>), CoreError> {
+        let sid = session_id.to_owned();
+        let max_ret = self.inner.max_retained_events;
+        self.call(move |conn| {
+            let tx = conn.transaction().map_err(db_err)?;
+            let now = now_rfc3339();
+            let current = load_session_record_tx(&tx, &sid)?;
+            if current.snapshot.status != SessionStatus::Active {
+                return Ok((current.snapshot, Vec::new()));
+            }
+
+            tx.execute(
+                "DELETE FROM turns WHERE session_id = ?1 AND status = 'reserved'",
+                params![sid],
+            )
+            .map_err(db_err)?;
+
+            let interrupted_turns = tx
+                .execute(
+                    "UPDATE turns SET status = 'interrupted_unknown', completed_at = ?1
+                     WHERE session_id = ?2 AND status = 'running'",
+                    params![now, sid],
+                )
+                .map_err(db_err)?;
+
+            let mut events =
+                expire_pending_interactions_tx(&tx, max_ret, &sid, &now, "daemon_shutdown")?;
+            let expired_interactions = events.len();
+
+            tx.execute(
+                "UPDATE actor_tokens SET revoked_at = ?1
+                 WHERE session_id = ?2 AND revoked_at IS NULL",
+                params![now, sid],
+            )
+            .map_err(db_err)?;
+
+            tx.execute(
+                "DELETE FROM writer_leases WHERE holder_session_id = ?1",
+                params![sid],
+            )
+            .map_err(db_err)?;
+
+            tx.execute(
+                "UPDATE sessions
+                 SET status = 'idle',
+                     active_turn_id = NULL,
+                     session_generation = session_generation + 1,
+                     updated_at = ?1
+                 WHERE session_id = ?2",
+                params![now, sid],
+            )
+            .map_err(db_err)?;
+
+            let (ev, _, _) = append_event_tx(
+                &tx,
+                max_ret,
+                &NewDurableEvent {
+                    session_id: sid.clone(),
+                    event_type: "session_recovered".to_owned(),
+                    turn_id: None,
+                    inline_text: None,
+                    payload: json!({
+                        "interrupted_turns": interrupted_turns,
+                        "expired_interactions": expired_interactions,
+                        "recovery_status": "interrupted_unknown",
+                        "reason": "daemon_shutdown",
+                    }),
+                    artifact: None,
+                    bump_interaction_revision: false,
+                },
+            )?;
+            events.push(ev);
+
+            let snap = load_session_record_tx(&tx, &sid)?.snapshot;
+            tx.commit().map_err(db_err)?;
+            Ok((snap, events))
+        })
+        .await
+    }
+
     /// Reserves the single active turn slot AND persists input metadata on the
     /// placeholder turn row BEFORE invoking `driver.send_turn(...)`, so early
     /// `TurnStarted` / `AssistantMessage` events see the exact prompt & schema.

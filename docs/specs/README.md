@@ -135,9 +135,11 @@ an optional single-writer lease keyed by canonicalized `workspace` path
 
 ## 4. Independent Daemon and Local Authentication
 
-- `dolgorae serve` binds a Unix domain socket under `~/.dolgorae/run/dolgorae.sock` (or an explicit `--socket` path) with `0600` permissions inside a `0700` directory.
+- `dolgorae serve` acquires an exclusive lock file (`~/.dolgorae/run/dolgorae.lock`) BEFORE opening `state.db` or running startup recovery, refusing duplicate daemons without disturbing live sessions. It refuses to start if `<home>`/`run` has permissions looser than `0700`, is not owned by the daemon UID, or if the socket path is a symlink.
+- `dolgorae serve` binds a Unix domain socket under `~/.dolgorae/run/dolgorae.sock` (or an explicit `--socket` path) with `0600` permissions inside a `0700` directory, and unlinks the socket on clean shutdown only when its inode matches the bound socket.
 - Every incoming UDS connection is authenticated via OS peer credentials (`LOCAL_PEERCRED` / `tokio::net::UnixStream::peer_cred()`); connections whose effective UID does not match the daemon UID are rejected before request dispatch.
 - Scoped Actor MCP bridges authenticate actor-scoped daemon requests with the single-actor token issued at session launch.
+- **Threat Model & Child Discovery**: Any process running as the same OS user passes `LOCAL_PEERCRED` and is treated as `ExternalHost` when no bearer token is sent. Scoped actor tokens constrain the MCP tool path (preventing accidental privilege escalation, cross-tree reads, or self-approval via MCP tools), while OS-level sandboxing remains the hard security boundary against malicious same-UID code. External hosts discover delegated child sessions via `GET /v2/sessions?root_session_id=<id>` and subscribe to each child's SSE stream to observe and answer child approvals.
 
 ## 5. Cursor, Revision, and Pagination Semantics
 

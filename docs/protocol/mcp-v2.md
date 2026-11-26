@@ -14,7 +14,7 @@ local account. Authenticated to `dolgorae serve` via same-user `LOCAL_PEERCRED`.
 | --- | --- | --- |
 | `dolgorae_capabilities` | _(none)_ | Probe registered drivers, models, and normative size bounds. |
 | `dolgorae_role_list` | `workspace?` | List resolved Role / Persona definitions. |
-| `dolgorae_session_start` | `workspace`, `driver`, `role?`, `model?`, `effort?`, `access?`, `approval_policy?`, `output_schema?`, `allow_delegation?`, `policy?` | Start a root session (`depth = 0`) with optional `SessionPolicy { max_delegation_depth (default 3, max 8), allow_actor_collaboration (default true) }`. |
+| `dolgorae_session_start` | `workspace`, `driver?`, `role?`, `parent_session_id?`, `model?`, `effort?`, `access?`, `approval_policy?`, `output_schema?`, `allow_delegation?`, `policy?` | Start a root session (`depth = 0`, or delegated child when `parent_session_id` is set) with optional `SessionPolicy { max_delegation_depth (default 3, max 8), allow_actor_collaboration (default true) }`; `driver` defaults from `role` when omitted. |
 | `dolgorae_session_get` | `session_id` | Return current session snapshot including `depth`, `policy`, `revision`, `head_cursor`, and `interaction_revision`. |
 | `dolgorae_session_wait` | `session_ids`, `mode?`, `timeout_ms?`, `waiter_session_id?` | Wait for `any` or `all` target sessions to finish a turn, transition status, or deliver mailbox output (rejects cyclic wait graphs with `DELEGATION_CYCLE`). |
 | `dolgorae_session_close` | `session_id` | Gracefully close a session and terminate its driver. |
@@ -26,7 +26,7 @@ local account. Authenticated to `dolgorae serve` via same-user `LOCAL_PEERCRED`.
 | `dolgorae_interaction_answer` | `session_id`, `interaction_id`, `turn_id`, `session_generation`, `expected_interaction_revision`, `expected_session_revision`, `decision_id`, `answers?`, `payload?` | Resolve a pending interaction with optimistic concurrency checks (`SNAPSHOT_CONFLICT` / HTTP `409` on mismatch). |
 | `dolgorae_mailbox_send` | `session_id`, `body`, `subject?`, `artifact_ids?` | Post a durable message to a session's mailbox. |
 | `dolgorae_mailbox_read` | `session_id`, `after?`, `limit?` | Read durable mailbox entries strictly after cursor `after`. |
-| `dolgorae_artifact_read` | `artifact_id`, `offset?`, `max_bytes?` | Read a bounded slice of an immutable artifact. |
+| `dolgorae_artifact_read` | `artifact_id`, `offset?`, `max_bytes?` | Read a bounded slice of an immutable artifact (default & max `65,536` bytes per MCP page; returns `{artifact_id, offset, bytes_read, next_offset, eof, encoding, content}`). |
 
 ## 2. Scoped Actor Mode (`dolgorae mcp --scoped`)
 
@@ -66,7 +66,7 @@ Injected automatically into child/delegating driver sessions via
 | `actor_child_cancel` | `child_session_id` | Interrupts/closes only direct children of `self` and revokes their actor tokens (else `FORBIDDEN_SCOPE`). |
 | `actor_mailbox_send` | `target_session_id`, `body`, `subject?` | Always allowed for parent <-> direct child; allowed for same-tree siblings/peers iff `SessionPolicy.allow_actor_collaboration == true`; cross-tree or disallowed peer rejected with `FORBIDDEN_SCOPE`. |
 | `actor_mailbox_read` | `after?`, `limit?` | Reads only `self`'s own durable mailbox. |
-| `actor_artifact_read` | `artifact_id`, `offset?`, `max_bytes?` | Reads only artifacts accessible to `self.root_session_id` (else `FORBIDDEN_SCOPE`). |
+| `actor_artifact_read` | `artifact_id`, `offset?`, `max_bytes?` | Reads only artifacts accessible to `self.root_session_id` (else `FORBIDDEN_SCOPE`; default & max `65,536` bytes per page, returning `{artifact_id, offset, bytes_read, next_offset, eof, encoding, content}`). |
 
 ## 3. Canonical Error Code Mapping
 

@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+dolgorae-api.workspace = true
 dolgorae-core.workspace = true
 dolgorae-spi.workspace = true
 serde.workspace = true
