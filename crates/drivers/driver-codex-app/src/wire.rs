@@ -70,8 +70,8 @@ pub(crate) fn parse_incoming_line(line: &str) -> Result<IncomingFrame, serde_jso
 /// Strictest native approval policy mapping (never `"never"`).
 pub(crate) fn approval_policy_wire_value(p: ApprovalPolicy) -> &'static str {
     match p {
-        ApprovalPolicy::Interactive | ApprovalPolicy::AutoApproveScoped => "on-request",
-        ApprovalPolicy::AutoDeny => "untrusted",
+        ApprovalPolicy::Interactive | ApprovalPolicy::AutoDeny => "untrusted",
+        ApprovalPolicy::AutoApproveScoped => "on-request",
     }
 }
 

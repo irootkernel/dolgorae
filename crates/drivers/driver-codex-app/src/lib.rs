@@ -745,12 +745,17 @@ mod tests {
 
     #[test]
     fn approval_policy_never_maps_to_never() {
-        for p in [
-            ApprovalPolicy::Interactive,
-            ApprovalPolicy::AutoDeny,
-            ApprovalPolicy::AutoApproveScoped,
-        ] {
-            assert_ne!(wire::approval_policy_wire_value(p), "never");
-        }
+        assert_eq!(
+            wire::approval_policy_wire_value(ApprovalPolicy::Interactive),
+            "untrusted"
+        );
+        assert_eq!(
+            wire::approval_policy_wire_value(ApprovalPolicy::AutoDeny),
+            "untrusted"
+        );
+        assert_eq!(
+            wire::approval_policy_wire_value(ApprovalPolicy::AutoApproveScoped),
+            "on-request"
+        );
     }
 }

@@ -41,6 +41,8 @@ all native ID and permission-grant mappings privately, and exposes only opaque
     --include-partial-messages \
     --replay-user-messages \
     --permission-prompts host \
+    --permission-prompt-tool stdio \
+    --permission-mode manual \
     --strict-mcp-config --mcp-config '<0600-file-in-0700-dir>'
   ```
 - **Verified Gotchas**:

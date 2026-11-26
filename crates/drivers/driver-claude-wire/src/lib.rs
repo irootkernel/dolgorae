@@ -294,6 +294,8 @@ pub(crate) fn build_launch_args(
         "--replay-user-messages",
         "--permission-prompts",
         "host",
+        "--permission-prompt-tool",
+        "stdio",
         "--permission-mode",
         "manual",
     ];
@@ -375,6 +377,10 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|w| w == ["--permission-prompts", "host"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--permission-prompt-tool", "stdio"])
         );
         assert!(args.windows(2).any(|w| w == ["--resume", "sess-42"]));
         assert!(args.iter().any(|a| a == "--disallowedTools"));
