@@ -80,6 +80,59 @@ Authorization rules for scoped actor delivery (`actor_mailbox_send`):
 3. **Collaboration Disabled**: When `SessionPolicy.allow_actor_collaboration == false`, only parent <-> direct child delivery is allowed; sibling/peer delivery is rejected with HTTP `403 Forbidden` (`FORBIDDEN_SCOPE`).
 4. **Cross-Tree Rejection**: Delivery to any session outside `self.root_session_id` is always rejected with HTTP `403 Forbidden` (`FORBIDDEN_SCOPE`).
 
+### 3.3 Session Wait / Join (`wait_sessions`)
+
+Callers and parent actors may wait for one or more target sessions to reach a
+terminal turn outcome, status transition (`idle`/`closed`/`failed`), or mailbox
+delivery (`POST /v2/sessions/wait`, External MCP `dolgorae_session_wait`, Scoped
+MCP `actor_child_wait`):
+
+- Supports `mode: "any" | "all"` and bounded `timeout_ms`.
+- If a waiter session (`waiter_session_id`) is supplied, registering wait edges
+  performs DFS cycle detection over the active wait graph BEFORE blocking; any
+  cycle fails closed with HTTP `409 Conflict` (`DELEGATION_CYCLE`). Wait edges
+  are released deterministically on completion, timeout, or cancellation.
+- In Scoped Actor Mode (`actor_child_wait`), targets MUST belong to the caller's
+  `root_session_id` tree (cross-tree targets fail with `403 FORBIDDEN_SCOPE`).
+
+### 3.4 Optional Workspace Single-Writer Lease
+
+To coordinate multi-actor edits safely within one repository, Dolgorae exposes
+an optional single-writer lease keyed by canonicalized `workspace` path
+(`POST /v2/workspaces/lease`, `POST /v2/workspaces/lease/transfer`,
+`DELETE /v2/workspaces/lease`, and External MCP `dolgorae_writer_lease` /
+`dolgorae_writer_transfer`):
+
+- When a workspace holds an active writer lease for `holder_session_id`, any
+  other session attempting to start or resume with `access: workspace_write` on
+  that canonical workspace is rejected with HTTP `409 Conflict`
+  (`SNAPSHOT_CONFLICT`). Read-only sessions remain unrestricted.
+- Leases transfer atomically via `transfer` (requiring `from_session_id`,
+  rejecting holder mismatch with `409 SNAPSHOT_CONFLICT`) and are automatically
+  released when the holder session closes or fails.
+
+### 3.5 Active Turn, `session_generation`, and Child Interaction Authority
+
+- **Single Active Turn**: Each session executes at most one in-flight turn at a
+  time. Submitting a turn while `active_turn_id` is set fails with HTTP `409
+  Conflict` (`SNAPSHOT_CONFLICT`).
+- **`session_generation` Rules**: Starts at `1` on session creation and
+  increments by `+1` on `resume`, daemon restart recovery (`interrupted_unknown`),
+  or driver crash recovery. Whenever `session_generation` advances, all pending
+  interactions from older generations are marked `expired`, and any answer
+  referencing an older generation fails with HTTP `409 Conflict`
+  (`SNAPSHOT_CONFLICT`).
+- **Child Interaction Authority**: External Host callers (CLI, HTTP/SSE,
+  External Host MCP) may answer pending interactions on any session (root or
+  child). Scoped Actors MUST NEVER answer their own or any child's pending
+  interactions (`403 FORBIDDEN_SCOPE`); child approvals either propagate to
+  external host subscribers via SSE or resolve automatically via the child's
+  `approval_policy`.
+- **Role Trust Boundary**: Workspace `.dolgorae/roles/*.md` files are untrusted
+  inputs bounded to `64 KiB` each. Frontmatter `driver`/`access` fields are
+  treated as defaults bounded by caller authority and MUST NEVER escalate a
+  scoped actor's `access` beyond its parent grant (`403 FORBIDDEN_SCOPE`).
+
 ## 4. Independent Daemon and Local Authentication
 
 - `dolgorae serve` binds a Unix domain socket under `~/.dolgorae/run/dolgorae.sock` (or an explicit `--socket` path) with `0600` permissions inside a `0700` directory.
@@ -95,13 +148,15 @@ Authorization rules for scoped actor delivery (`actor_mailbox_send`):
   - `interaction_revision <= revision`
 - **Timeline Pagination**: Timeline responses return `highest_cursor` (the numeric decimal cursor of the newest timeline item) as a field **separate** from `next_page_token` (opaque pagination token for older/additional pages). Clients use `highest_cursor` for stream baselines and never treat `next_page_token` as a cursor.
 
-## 6. Server-Sent Events (SSE) Contract
+## 6. Server-Sent Events (SSE), Durability, and Retention Contract
 
 `GET /v2/sessions/{id}/events` streams `text/event-stream` frames:
 
-- Every domain event sets `id: <cursor>` where `<cursor>` equals the event's canonical decimal `u64` cursor.
+- **Durable vs. Ephemeral Events**:
+  - **Durable, cursor-advancing events** are persisted in SQLite `session_events`, increment `revision`, and carry `id: <cursor>` (`session_created`, `session_resumed`, `session_recovered`, `session_closed`, `turn_started`, `assistant_message`, `tool_activity` for `started`/`completed`/`failed`, `interaction_requested`, `interaction_resolved`, `interaction_expired`, `usage`, `turn_completed`, `mailbox_received`, `error`).
+  - **Ephemeral live-only events** (`text_delta`, `tool_delta`, `heartbeat`) are broadcast to live SSE subscribers WITHOUT an `id:` line, are NOT persisted in SQLite, and do NOT increment `revision`. Reconnecting clients recover final outputs from durable `assistant_message` and `turn_completed` records without per-token SQLite write amplification.
 - Reconnection via `Last-Event-ID: <cursor>` (or query `?after=<cursor>`) is **strictly exclusive** (`event_cursor > after`) and replays from the durable SQLite event log before switching to live delivery.
-- **Gap / Expiration Signaling**: If the requested `Last-Event-ID` falls behind the retained log window or cannot be replayed contiguously, the server MUST emit an explicit `event: refresh_required` frame containing a structured refresh mask (`scopes: ["session", "interaction", "timeline", "artifacts", "mailbox"]`) rather than silently skipping events.
+- **Retention Window & Gap / Expiration Signaling**: Each session retains up to `max_retained_events_per_session` durable events (default `10,000`, configurable for storage bounding and testing) and records `earliest_retained_cursor` atomically when older events are pruned. If the requested `Last-Event-ID` falls behind the retained window (`earliest_retained_cursor > 0 && after + 1 < earliest_retained_cursor`), exceeds the current revision (`after > revision`), or cannot be replayed contiguously, the server MUST emit an explicit `event: refresh_required` frame containing a structured refresh mask (`scopes: ["session", "interaction", "timeline", "artifacts", "mailbox"]`) rather than silently skipping events.
 - **Heartbeat**: Periodic `event: heartbeat` frames keep idle streams alive, carry NO `id:` line (never advancing the client's last cursor), and do not increment `revision`.
 
 ## 7. Interactions, Tolerant Reader Policy, and Optimistic Concurrency

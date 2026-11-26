@@ -447,6 +447,122 @@ paths:
         "413":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v2/sessions/wait:
+    post:
+      operationId: waitSessions
+      summary: Wait for any or all target sessions to complete a turn or transition status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_ids]
+              properties:
+                waiter_session_id: { type: [string, "null"] }
+                session_ids:
+                  type: array
+                  minItems: 1
+                  items: { type: string }
+                mode: { type: string, enum: [any, all], default: all }
+                timeout_ms: { type: integer, minimum: 1, maximum: 300000, default: 30000 }
+      responses:
+        "200":
+          description: Wait completed or timed out cleanly
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [completed_session_ids, timed_out, sessions]
+                properties:
+                  completed_session_ids:
+                    type: array
+                    items: { type: string }
+                  timed_out: { type: boolean }
+                  sessions:
+                    type: array
+                    items: { $ref: "#/components/schemas/SessionSnapshot" }
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Cyclic wait graph (`DELEGATION_CYCLE`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v2/workspaces/lease:
+    post:
+      operationId: acquireWriterLease
+      summary: Acquire optional single-writer lease for a canonical workspace path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspace, session_id]
+              properties:
+                workspace: { type: string }
+                session_id: { type: string }
+      responses:
+        "200":
+          description: Writer lease acquired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WriterLease" }
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: releaseWriterLease
+      summary: Release a workspace single-writer lease held by a session
+      parameters:
+        - name: workspace
+          in: query
+          required: true
+          schema: { type: string }
+        - name: session_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Writer lease released
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [released]
+                properties:
+                  released: { type: boolean }
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/workspaces/lease/transfer:
+    post:
+      operationId: transferWriterLease
+      summary: Atomically transfer an active workspace single-writer lease
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspace, from_session_id, to_session_id]
+              properties:
+                workspace: { type: string }
+                from_session_id: { type: string }
+                to_session_id: { type: string }
+      responses:
+        "200":
+          description: Writer lease transferred
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WriterLease" }
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v2/artifacts:
     post:
       operationId: createArtifact
@@ -894,6 +1010,14 @@ components:
             - $ref: "#/components/schemas/ArtifactRef"
             - type: "null"
         created_at: { type: string, format: date-time }
+
+    WriterLease:
+      type: object
+      required: [workspace, holder_session_id, acquired_at]
+      properties:
+        workspace: { type: string }
+        holder_session_id: { type: string }
+        acquired_at: { type: string, format: date-time }
 
     ErrorEnvelope:
       type: object

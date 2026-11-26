@@ -16,7 +16,10 @@ local account. Authenticated to `dolgorae serve` via same-user `LOCAL_PEERCRED`.
 | `dolgorae_role_list` | `workspace?` | List resolved Role / Persona definitions. |
 | `dolgorae_session_start` | `workspace`, `driver`, `role?`, `model?`, `effort?`, `access?`, `approval_policy?`, `output_schema?`, `allow_delegation?`, `policy?` | Start a root session (`depth = 0`) with optional `SessionPolicy { max_delegation_depth (default 3, max 8), allow_actor_collaboration (default true) }`. |
 | `dolgorae_session_get` | `session_id` | Return current session snapshot including `depth`, `policy`, `revision`, `head_cursor`, and `interaction_revision`. |
+| `dolgorae_session_wait` | `session_ids`, `mode?`, `timeout_ms?`, `waiter_session_id?` | Wait for `any` or `all` target sessions to finish a turn, transition status, or deliver mailbox output (rejects cyclic wait graphs with `DELEGATION_CYCLE`). |
 | `dolgorae_session_close` | `session_id` | Gracefully close a session and terminate its driver. |
+| `dolgorae_writer_lease` | `workspace`, `session_id`, `release?` | Acquire (or release when `release: true`) the optional single-writer lease on canonical `workspace` (`SNAPSHOT_CONFLICT` if already held). |
+| `dolgorae_writer_transfer` | `workspace`, `from_session_id`, `to_session_id` | Atomically transfer an active workspace writer lease (`SNAPSHOT_CONFLICT` on holder mismatch). |
 | `dolgorae_turn_submit` | `session_id`, `text`, `effort?`, `attachments?`, `output_schema_override?` | Submit a turn to an active session. |
 | `dolgorae_turn_interrupt` | `session_id`, `turn_id` | Request interruption of an in-flight turn. |
 | `dolgorae_timeline_read` | `session_id`, `page_token?`, `limit?` | Read bounded timeline items (`highest_cursor` distinct from `next_page_token`). |
@@ -59,7 +62,8 @@ Injected automatically into child/delegating driver sessions via
 | --- | --- | --- |
 | `actor_delegate` | `role?`, `driver?`, `model?`, `effort?`, `access?`, `prompt`, `output_schema?` | Spawns child with `parent_session_id = self`, `depth = self.depth + 1`, `access <= self.access`. Rejects with `DELEGATION_DEPTH_EXCEEDED`, `DELEGATION_CYCLE`, or `FORBIDDEN_SCOPE`. |
 | `actor_child_status` | `child_session_id` | Allowed only when `child.parent_session_id == self` (else `FORBIDDEN_SCOPE`). |
-| `actor_child_cancel` | `child_session_id` | Interrupts/closes only direct children of `self` (else `FORBIDDEN_SCOPE`). |
+| `actor_child_wait` | `child_session_ids`, `mode?`, `timeout_ms?` | Wait (`any` or `all`) for same-tree child/target sessions; rejects cross-tree targets (`FORBIDDEN_SCOPE`) and cyclic wait graphs (`DELEGATION_CYCLE`). |
+| `actor_child_cancel` | `child_session_id` | Interrupts/closes only direct children of `self` and revokes their actor tokens (else `FORBIDDEN_SCOPE`). |
 | `actor_mailbox_send` | `target_session_id`, `body`, `subject?` | Always allowed for parent <-> direct child; allowed for same-tree siblings/peers iff `SessionPolicy.allow_actor_collaboration == true`; cross-tree or disallowed peer rejected with `FORBIDDEN_SCOPE`. |
 | `actor_mailbox_read` | `after?`, `limit?` | Reads only `self`'s own durable mailbox. |
 | `actor_artifact_read` | `artifact_id`, `offset?`, `max_bytes?` | Reads only artifacts accessible to `self.root_session_id` (else `FORBIDDEN_SCOPE`). |
