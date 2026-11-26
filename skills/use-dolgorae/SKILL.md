@@ -16,10 +16,14 @@ supporting Tier-1 structured CLI drivers (`codex-app`, `claude-wire`,
 
 ## Current Stage Status
 
-Dolgorae v2 is currently in Stage 1 (`V2-T01` workspace/SPI/contracts baseline).
-`dolgorae version`, `dolgorae version --json`, and `dolgorae drivers` are
-available; `dolgorae serve` and `dolgorae mcp` runtime handlers land in
-`V2-T02` through `V2-T04`.
+Dolgorae v2 Stage 1 (`EPIC-V2-001`: `V2-T01` through `V2-T04` and `V2-VAL`) is
+implemented across all 8 crates. `dolgorae serve` (independent UDS HTTP/1.1
+JSON+SSE daemon with `LOCAL_PEERCRED` auth), `dolgorae mcp [--scoped]`
+(External Host 15-tool mode and Scoped Actor 7-tool mode), and `--json` /
+`--human` CLI subcommands (`version`, `driver list|doctor`, `role list|show`,
+`session ...`, `workspace lease|transfer|release`, `artifact read`) are
+operational across `codex-app`, `claude-wire`, and `agy-acp`. Expanded
+ecosystem workflows (Haeryong/Aquarium playbooks) remain scoped to `V2-ECO-01`.
 
 ## Safety and Authorization Boundaries
 

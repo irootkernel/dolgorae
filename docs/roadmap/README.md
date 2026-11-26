@@ -11,7 +11,7 @@ Historical v0.1.4 delivery records remain on branch `legacy/v0.1.4` (`b083146`).
 | `V2-T02` | Tier-1 structured drivers (`driver-codex-app`, `driver-claude-wire`, `driver-agy-acp`), scoped MCP injection, PGID teardown, and shared fake-stdio conformance suite | `COMPLETED` |
 | `V2-T03` | `dolgorae-core`: Role/Persona loader, SQLite WAL event log & mailbox, decimal u64 cursor/revision ledger, optimistic concurrency checks, 256 KiB / 64 MiB content-addressed artifact store, delegation depth/cycle enforcement, writer lease, and actor token issuance | `COMPLETED` |
 | `V2-T04` | `dolgorae-api` (UDS HTTP/1.1 JSON + SSE, `LOCAL_PEERCRED`, `Last-Event-ID` replay, `refresh_required`, heartbeat), `dolgorae-mcp` (External Host + Scoped Actor Mode), and `dolgorae-cli` (`serve`, `mcp`, `drivers`, session/role commands) | `COMPLETED` |
-| `V2-VAL` | Cold end-to-end verification of Stage 1 across all 8 crates, static guards, mock-driver E2E tests, and bounded opt-in live CLI smoke verification | `PENDING` |
+| `V2-VAL` | Cold end-to-end verification of Stage 1 across all 8 crates, static guards, mock-driver E2E tests, and bounded opt-in live CLI smoke verification | `COMPLETED` |
 
 ## Stage 2 — Gul v2 Consumer Migration (`EPIC-V2-002`)
 

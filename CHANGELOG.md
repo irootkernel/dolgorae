@@ -24,6 +24,28 @@ development commits.
   (`tools/check_v2_guards.py`) enforcing workspace dependency boundaries,
   anti-evasion production line budgets (`<= 15,000` core/api/mcp/cli/spi lines,
   `<= 1,500` lines per driver), and provider-term isolation.
+- **Tier-1 structured CLI drivers (`V2-T02`)**: Implemented `driver-codex-app`,
+  `driver-claude-wire`, and `driver-agy-acp` against `dolgorae-spi` (each
+  within `<= 1,500` production lines and zero `unsafe`), with zero-argv-secret
+  MCP injection, shared `evaluate_interaction` `ReadOnly` safety floor,
+  deadlock-free PGID teardown, and 32 offline fake-stdio conformance tests.
+- **Unified Actor Core Engine (`V2-T03`)**: Implemented `dolgorae-core` with a
+  dedicated single-writer SQLite WAL thread, canonical decimal `u64`
+  Cursor/Revision ledger, ephemeral live-only streaming deltas, retention
+  pruning with `refresh_required` gap signaling, streaming SHA-256
+  content-addressed artifacts (`256 KiB` inline / `64 MiB` cap), symlink-safe
+  Markdown/YAML Roles, Invariant 4 depth/cycle/per-operation scoped-actor
+  isolation, CSPRNG hashed actor tokens, unified root-tree mailbox waking
+  `wait_sessions(any|all)`, and optional workspace single-writer leases.
+- **Thin API, Dual-Mode MCP & CLI Composition Root (`V2-T04`, `V2-VAL`)**:
+  Implemented `dolgorae-api` (exclusive `DaemonLock`, safe `LOCAL_PEERCRED`
+  UID checks, all 19 OpenAPI v2 routes, no-silent-gap SSE lag recovery,
+  UTF-8-safe byte-buffered `UdsClient`), `dolgorae-mcp` (15 External Host
+  tools + 7 fail-closed Scoped Actor tools with real `>256 KiB` `ArtifactRef`
+  spill and lossless `64 KiB` pagination), and `dolgorae-cli` (independent
+  `serve` detaching active sessions to resumable `idle` on SIGTERM), verified
+  offline via `make test` and live across `codex 0.172.0`, `claude 2.1.332`,
+  and `agy 1.5.18` with zero orphan processes.
 - **Consumer compatibility**: Frozen v0.1.4 gRPC consumers (including Gul H4)
   stay on `legacy/v0.1.4` until Stage 2 (`V2-GUL-01`).
 

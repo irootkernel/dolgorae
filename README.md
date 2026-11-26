@@ -23,7 +23,7 @@ crates/
   drivers/
     driver-codex-app/    Tier-1 structured driver for `codex app-server --stdio`
     driver-claude-wire/  Tier-1 structured driver for `claude -p --verbose ... stream-json`
-    driver-agy-acp/      Tier-1 structured driver for `agy acp --stdio`
+    driver-agy-acp/      Tier-1 structured driver for `agy acp --stdio --process-per-session`
 ```
 
 ## Toolchain and Verification

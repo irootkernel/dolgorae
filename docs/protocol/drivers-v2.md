@@ -28,8 +28,8 @@ all native ID and permission-grant mappings privately, and exposes only opaque
   - `item/permissions/requestApproval` -> `InteractionKind::PermissionRequest { permissions, reason }` (human-readable permission labels only; native `GrantedPermissionProfile` kept inside driver map!) -> `{permissions, scope: "turn" | "session"}`
   - `item/tool/requestUserInput` -> `InteractionKind::UserQuestion { questions: [UserQuestionItem] }` (`isSecret` sets `is_secret = true` and `InteractionRequest.protected = true`) -> `{answers: {<q_id>: {answers: [...]}}}`
   - `mcpServer/elicitation/request` -> `InteractionKind::McpElicitation { server_name, message, requested_schema }` -> `{action: "accept" | "decline" | "cancel", content?}`
-- **Stdio MCP Injection**:
-  - CLI flag `-c 'mcp_servers.<name>={command="...",args=["..."],env={DOLGORAE_ACTOR_TOKEN="..."}}'` (TOML inline table) or `thread/start` `config.mcp_servers`.
+- **Stdio MCP Injection (Zero Secrets in `argv`)**:
+  - Actor tokens and MCP server secrets MUST NEVER be passed via CLI flags (`-c`). `driver-codex-app` sends `mcp_servers` exclusively over stdin JSON-RPC inside `thread/start` / `thread/resume` `config.mcp_servers`.
 
 ## 2. `driver-claude-wire` — Claude Code (`2.1.332`)
 
@@ -41,11 +41,11 @@ all native ID and permission-grant mappings privately, and exposes only opaque
     --include-partial-messages \
     --replay-user-messages \
     --permission-prompts host \
-    --strict-mcp-config --mcp-config '<json>'
+    --strict-mcp-config --mcp-config '<0600-file-in-0700-dir>'
   ```
 - **Verified Gotchas**:
   1. `--verbose` is **mandatory** whenever `-p --output-format stream-json` is used (omitting it exits with code 1).
-  2. Always pass `--strict-mcp-config --mcp-config '{"mcpServers":{...}}'` so Claude does not load unrelated user-global MCP servers. Because `--mcp-config` is variadic (`<configs...>`), never place a positional prompt directly after it.
+  2. Always pass `--strict-mcp-config --mcp-config <path>` pointing to a `0600` config file inside a `0700` private temporary directory (removed on `close()` and `Drop`) so Claude neither loads unrelated user-global MCP servers nor exposes `DOLGORAE_ACTOR_TOKEN` in process `argv` (`ps`). Inline JSON secrets in `argv` are **FORBIDDEN**. Because `--mcp-config` is variadic (`<configs...>`), never place a positional prompt directly after it.
   3. Do NOT pass `--bare` for subscription/OAuth users (it disables OAuth/keychain and forces `ANTHROPIC_API_KEY`).
   4. Native `--json-schema <schema>` is supported (`native_output_schema = true`), alongside `--append-system-prompt`, `--system-prompt`, `--session-id <uuid>` (for fresh sessions so `provider_session_id` is stable before the first turn), `--resume <session_id>`, `--effort <low|medium|high|xhigh|max>`, `--model <alias|id>`, and `--permission-mode <acceptEdits|auto|bypassPermissions|manual|dontAsk|plan>`.
 - **Wire NDJSON**:
