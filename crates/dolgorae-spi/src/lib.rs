@@ -16,7 +16,7 @@
 //!   returns a deserialization error rather than silently dropping data.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -768,6 +768,140 @@ pub trait AgentDriver: Send + Sync {
     -> Result<Box<dyn DriverSession>, DriverError>;
 }
 
+/// Result of evaluating an interactive driver request against `AccessMode` and `ApprovalPolicy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoDecision {
+    /// Automatically approve without prompting a caller.
+    Allow,
+    /// Automatically deny without prompting a caller.
+    Deny { reason: String },
+    /// Escalate to the caller for an interactive decision.
+    Ask,
+}
+
+/// Evaluates an `InteractionKind` against the session's `AccessMode`,
+/// `ApprovalPolicy`, workspace root, and whether the runtime enforces an OS
+/// sandbox (`os_sandboxed`).
+///
+/// Policy invariants:
+/// - `AccessMode::ReadOnly` is a safety floor: `FileChangeApproval` is always
+///   denied regardless of `ApprovalPolicy`.
+/// - Automatic policies (`AutoDeny`, `AutoApproveScoped`) never return `Ask`.
+/// - `AutoApproveScoped` approves only:
+///   - `FileChangeApproval` under `WorkspaceWrite` when every target path (and
+///     optional `move_path`) lexically normalizes inside `workspace`, and
+///   - `CommandApproval` only when `os_sandboxed == true` and `cwd` (if
+///     present) lexically normalizes inside `workspace`.
+///   - `PermissionRequest`, `McpElicitation`, `UserQuestion`, and `Unsupported`
+///     are always denied.
+/// - Path containment is lexical because this helper is pure and does not touch
+///   the filesystem; symlink escape remains a residual risk mitigated by OS
+///   sandboxing and core-level path canonicalization.
+pub fn evaluate_interaction(
+    kind: &InteractionKind,
+    access: AccessMode,
+    policy: ApprovalPolicy,
+    workspace: &Path,
+    os_sandboxed: bool,
+) -> AutoDecision {
+    // Safety floor: ReadOnly never permits file mutation under any policy.
+    if access == AccessMode::ReadOnly && matches!(kind, InteractionKind::FileChangeApproval { .. })
+    {
+        return AutoDecision::Deny {
+            reason: "workspace access is read_only".to_owned(),
+        };
+    }
+
+    match policy {
+        ApprovalPolicy::AutoDeny => AutoDecision::Deny {
+            reason: "approval_policy is auto_deny".to_owned(),
+        },
+        ApprovalPolicy::Interactive => AutoDecision::Ask,
+        ApprovalPolicy::AutoApproveScoped => match kind {
+            InteractionKind::FileChangeApproval { changes, .. } => {
+                if changes.is_empty() {
+                    return AutoDecision::Deny {
+                        reason: "file change approval contains no paths".to_owned(),
+                    };
+                }
+                let all_inside = changes.iter().all(|entry| {
+                    is_lexically_within(workspace, Path::new(&entry.path))
+                        && entry
+                            .move_path
+                            .as_deref()
+                            .is_none_or(|dst| is_lexically_within(workspace, Path::new(dst)))
+                });
+                if all_inside {
+                    AutoDecision::Allow
+                } else {
+                    AutoDecision::Deny {
+                        reason: "file change path escapes workspace".to_owned(),
+                    }
+                }
+            }
+            InteractionKind::CommandApproval { cwd, .. } => {
+                if !os_sandboxed {
+                    return AutoDecision::Deny {
+                        reason: "command auto-approval requires an OS sandbox".to_owned(),
+                    };
+                }
+                let cwd_ok = cwd
+                    .as_deref()
+                    .is_none_or(|dir| is_lexically_within(workspace, Path::new(dir)));
+                if cwd_ok {
+                    AutoDecision::Allow
+                } else {
+                    AutoDecision::Deny {
+                        reason: "command cwd escapes workspace".to_owned(),
+                    }
+                }
+            }
+            InteractionKind::PermissionRequest { .. }
+            | InteractionKind::McpElicitation { .. }
+            | InteractionKind::UserQuestion { .. }
+            | InteractionKind::Unsupported { .. } => AutoDecision::Deny {
+                reason: "interaction kind is outside auto_approve_scoped policy".to_owned(),
+            },
+        },
+    }
+}
+
+fn normalize_lexical(path: &Path) -> Option<PathBuf> {
+    let mut stack: Vec<Component<'_>> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match stack.last() {
+                Some(Component::Normal(_)) => {
+                    stack.pop();
+                }
+                _ => return None,
+            },
+            other => stack.push(other),
+        }
+    }
+    let mut out = PathBuf::new();
+    for comp in stack {
+        out.push(comp.as_os_str());
+    }
+    Some(out)
+}
+
+fn is_lexically_within(workspace: &Path, candidate: &Path) -> bool {
+    let Some(norm_ws) = normalize_lexical(workspace) else {
+        return false;
+    };
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        norm_ws.join(candidate)
+    };
+    let Some(norm_cand) = normalize_lexical(&joined) else {
+        return false;
+    };
+    norm_cand.starts_with(&norm_ws)
+}
+
 /// Active driver-managed runtime session.
 #[async_trait]
 pub trait DriverSession: Send + Sync {
@@ -775,6 +909,12 @@ pub trait DriverSession: Send + Sync {
     fn provider_session_id(&self) -> &str;
 
     /// Takes ownership of the normalized event stream for this session.
+    ///
+    /// Callers MUST drain this receiver concurrently while issuing RPC methods
+    /// (`send_turn`, `interrupt_turn`, `answer_interaction`, `close`); because
+    /// drivers apply backpressure on the bounded event channel rather than
+    /// dropping events, an undrained full channel can stall the driver's stdout
+    /// reader and time out concurrent RPC replies.
     fn take_events(&mut self) -> Option<EventReceiver>;
 
     /// Submits a new user turn to the running session.
@@ -1157,5 +1297,150 @@ mod tests {
             malformed_known_event.is_err(),
             "known NormalizedEvent tag missing required fields must fail"
         );
+    }
+
+    #[test]
+    fn evaluate_interaction_full_policy_matrix() {
+        let ws = Path::new("/work/repo");
+        let cmd_in = InteractionKind::CommandApproval {
+            command: vec!["cargo".to_owned(), "test".to_owned()],
+            cwd: Some("/work/repo/crates".to_owned()),
+            reason: None,
+        };
+        let cmd_out = InteractionKind::CommandApproval {
+            command: vec!["ls".to_owned()],
+            cwd: Some("/etc".to_owned()),
+            reason: None,
+        };
+        let file_in = InteractionKind::FileChangeApproval {
+            changes: vec![FileChangeEntry {
+                path: "src/lib.rs".to_owned(),
+                move_path: Some("src/core.rs".to_owned()),
+                kind: "modify".to_owned(),
+                unified_diff: None,
+            }],
+            reason: None,
+        };
+        let file_escape = InteractionKind::FileChangeApproval {
+            changes: vec![FileChangeEntry {
+                path: "../outside.txt".to_owned(),
+                move_path: None,
+                kind: "modify".to_owned(),
+                unified_diff: None,
+            }],
+            reason: None,
+        };
+        let file_abs_outside = InteractionKind::FileChangeApproval {
+            changes: vec![FileChangeEntry {
+                path: "/tmp/evil.sh".to_owned(),
+                move_path: None,
+                kind: "create".to_owned(),
+                unified_diff: None,
+            }],
+            reason: None,
+        };
+        let perm = InteractionKind::PermissionRequest {
+            permissions: vec!["network:egress".to_owned()],
+            reason: None,
+        };
+        let question = InteractionKind::UserQuestion {
+            questions: vec![UserQuestionItem {
+                id: "q1".to_owned(),
+                header: None,
+                question: "Token?".to_owned(),
+                options: vec![],
+                allows_other: true,
+                is_secret: true,
+            }],
+        };
+        let elicit = InteractionKind::McpElicitation {
+            server_name: "vault".to_owned(),
+            message: "Approve".to_owned(),
+            requested_schema: None,
+        };
+        let unsupported = InteractionKind::Unsupported {
+            original_kind: "vendor/x".to_owned(),
+            reason: None,
+            payload: json!({}),
+        };
+
+        let all_kinds = [
+            ("cmd_in", &cmd_in),
+            ("cmd_out", &cmd_out),
+            ("file_in", &file_in),
+            ("file_escape", &file_escape),
+            ("file_abs_outside", &file_abs_outside),
+            ("perm", &perm),
+            ("question", &question),
+            ("elicit", &elicit),
+            ("unsupported", &unsupported),
+        ];
+        let accesses = [AccessMode::ReadOnly, AccessMode::WorkspaceWrite];
+        let policies = [
+            ApprovalPolicy::Interactive,
+            ApprovalPolicy::AutoDeny,
+            ApprovalPolicy::AutoApproveScoped,
+        ];
+        let sandboxes = [false, true];
+
+        for (label, kind) in all_kinds {
+            for access in accesses {
+                for policy in policies {
+                    for os_sandboxed in sandboxes {
+                        let got = evaluate_interaction(kind, access, policy, ws, os_sandboxed);
+
+                        // Invariant: auto policies NEVER return Ask.
+                        if matches!(
+                            policy,
+                            ApprovalPolicy::AutoDeny | ApprovalPolicy::AutoApproveScoped
+                        ) {
+                            assert!(
+                                !matches!(got, AutoDecision::Ask),
+                                "auto policy returned Ask for ({label}, {access:?}, {policy:?}, {os_sandboxed})"
+                            );
+                        }
+
+                        // Invariant: ReadOnly ALWAYS denies FileChangeApproval.
+                        if access == AccessMode::ReadOnly
+                            && matches!(kind, InteractionKind::FileChangeApproval { .. })
+                        {
+                            assert!(
+                                matches!(got, AutoDecision::Deny { .. }),
+                                "ReadOnly must deny FileChangeApproval for ({label}, {policy:?}, {os_sandboxed})"
+                            );
+                            continue;
+                        }
+
+                        match policy {
+                            ApprovalPolicy::AutoDeny => {
+                                assert!(matches!(got, AutoDecision::Deny { .. }));
+                            }
+                            ApprovalPolicy::Interactive => {
+                                assert_eq!(got, AutoDecision::Ask);
+                            }
+                            ApprovalPolicy::AutoApproveScoped => {
+                                let expect_allow = match label {
+                                    "file_in" => access == AccessMode::WorkspaceWrite,
+                                    "cmd_in" => os_sandboxed,
+                                    _ => false,
+                                };
+                                if expect_allow {
+                                    assert_eq!(
+                                        got,
+                                        AutoDecision::Allow,
+                                        "expected Allow for ({label}, {access:?}, {policy:?}, {os_sandboxed})"
+                                    );
+                                } else {
+                                    assert!(
+                                        matches!(got, AutoDecision::Deny { .. }),
+                                        "expected Deny for ({label}, {access:?}, {policy:?}, {os_sandboxed})"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -19,7 +19,7 @@ crates/
   drivers/
     driver-codex-app/    Tier-1 structured driver for `codex app-server --stdio`
     driver-claude-wire/  Tier-1 structured driver for `claude -p --verbose ... stream-json`
-    driver-agy-acp/      Tier-1 structured driver for `agy acp --stdio`
+    driver-agy-acp/      Tier-1 structured driver for `agy acp --stdio --process-per-session`
 ```
 
 ## 2. Mechanical Dependency Rules
@@ -67,7 +67,7 @@ dolgorae serve (single user-scoped daemon)
    └── Driver Supervisors (one child process per active driver session)
          ├── driver-codex-app   ──stdio──▶ codex app-server --stdio
          ├── driver-claude-wire ──stdio──▶ claude -p --verbose ... stream-json
-         └── driver-agy-acp     ──stdio──▶ agy acp --stdio
+         └── driver-agy-acp     ──stdio──▶ agy acp --stdio --process-per-session
                 │
                 └── (optional Scoped MCP) ──stdio──▶ dolgorae mcp --scoped
                                                         │ (DOLGORAE_ACTOR_TOKEN over UDS)

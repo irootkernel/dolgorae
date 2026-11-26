@@ -47,7 +47,7 @@ all native ID and permission-grant mappings privately, and exposes only opaque
   1. `--verbose` is **mandatory** whenever `-p --output-format stream-json` is used (omitting it exits with code 1).
   2. Always pass `--strict-mcp-config --mcp-config '{"mcpServers":{...}}'` so Claude does not load unrelated user-global MCP servers. Because `--mcp-config` is variadic (`<configs...>`), never place a positional prompt directly after it.
   3. Do NOT pass `--bare` for subscription/OAuth users (it disables OAuth/keychain and forces `ANTHROPIC_API_KEY`).
-  4. Native `--json-schema <schema>` is supported (`native_output_schema = true`), alongside `--append-system-prompt`, `--system-prompt`, `--resume <session_id>`, `--effort <low|medium|high|xhigh|max>`, `--model <alias|id>`, and `--permission-mode <acceptEdits|auto|bypassPermissions|manual|dontAsk|plan>`.
+  4. Native `--json-schema <schema>` is supported (`native_output_schema = true`), alongside `--append-system-prompt`, `--system-prompt`, `--session-id <uuid>` (for fresh sessions so `provider_session_id` is stable before the first turn), `--resume <session_id>`, `--effort <low|medium|high|xhigh|max>`, `--model <alias|id>`, and `--permission-mode <acceptEdits|auto|bypassPermissions|manual|dontAsk|plan>`.
 - **Wire NDJSON**:
   - **Stdin user turn**: `{"type":"user","message":{"role":"user","content":"..."},"parent_tool_use_id":null,"session_id":"..."}`
   - **Stdin control requests**: `{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize"|"interrupt"|"set_permission_mode"|"set_model"|"mcp_status"|...}}`
@@ -59,11 +59,16 @@ all native ID and permission-grant mappings privately, and exposes only opaque
 
 ## 3. `driver-agy-acp` — Agy (`1.5.18`)
 
-- **Invocation**: `agy acp --stdio`
+- **Invocation**: `agy acp --stdio --process-per-session`
 - **Framing**: Standard JSON-RPC 2.0 NDJSON.
 - **Handshake & Session Lifecycle**:
   - `initialize` (`{protocolVersion: 1, clientCapabilities: {...}, clientInfo: {name, version}}`) -> `protocolVersion: 1`, `agentInfo`, `agentCapabilities` (`loadSession`, `sessionCapabilities: {resume, close, load, list, additionalDirectories}`, `_meta.antigravity: {tier: true, systemPrompt: {append: true}}`).
-  - `session/new`: `{cwd: "<abs>", mcpServers: [...], _meta?: {"antigravity": {"systemPrompt": {"append": "..."}}}}` -> `{sessionId, models, modes, configOptions: [model, thought_level, mode]}`.
+  - `session/new`: `{cwd: "<abs>", mcpServers: [...], _meta?: {"antigravity": {"systemPrompt": {"append": "..."}}}}` -> `{sessionId, models, modes, configOptions: [model, thought_level, mode]}`. Observed `agy 1.5.18` `modes` (`currentModeId: "default"`, `availableModes`):
+    - `default`: "Ask before edits and commands, per your permission settings."
+    - `accept-edits`: "Approve file edits in the workspace without asking."
+    - `auto`: "Approve edits and safe commands; ask before irreversible actions."
+    - `plan`: "Plan carefully before executing a task."
+    Under `AccessMode::ReadOnly`, `driver-agy-acp` calls `session/set_mode` to select a safe advertised mode in preference order `["read-only", "read_only", "ask", "default"]` (selecting `"default"` on `agy 1.5.18`, never `"plan"`, `"auto"`, or `"accept-edits"`) and fails closed with `DriverError::Unsupported` if none is advertised. Residual risk: user-level Agy permission settings ("per your permission settings") may pre-allow edits before ACP prompts; any edit permission request that reaches `session/request_permission` is hard-denied by `evaluate_interaction`.
   - `session/set_config_option`, `session/set_mode`, `session/set_model`, `session/resume`, `session/close`.
 - **Turn, Cancellation, and Permissions (ACP v1)**:
   - `session/prompt`: `{sessionId, prompt: [{type: "text", text: "..."}]}` -> `{stopReason, usage?}`
