@@ -669,6 +669,26 @@ expiry notification wiring changes.
   `validate_provisioning` and `prepare_provisioning` paths while keeping
   `RetainedSnapshot::verify` on `validate_for_recovery()`.
 
+## DF-054: Coalesce approval-opened journal revision bumps to remove operator refetch race
+
+- Owner: Turn coordinator and interaction projection maintainers
+- Finding: `src/turn.rs:4792-4803` appends `ApprovalRequested` (`SEQ 18`,
+  `client_projection: interaction.opened`, revision 18) and `InteractionOpened`
+  (`SEQ 19`, `client_projection: None`, revision 19) as two separate journal
+  appends ~12 ms apart. Because the client sees the opened card at revision 18
+  while the Run advances to revision 19 immediately afterward, an immediate
+  operator click before Gul's 5 s `GetInteraction` refetch hits Gul's
+  `v2_interaction.go:446` stale-revision guard (`ErrConflict`) pre-dispatch.
+- Reason for deferral: `v2_interaction.go:446` fails closed with zero safety or
+  authority bypass, and waiting for settled revision 19 succeeds HTTP 200 on
+  first submission (verified in `EPIC-024` `GU-05`). Coalescing the two appends
+  or immediately pushing revision 19 to clients belongs in coordinated
+  post-`v0.1.4` work (paired with Gul `E16-FB-001`) rather than rebuilding the
+  qualified H3/H4 pair.
+- Revisit condition: the next post-`v0.1.4` interaction-journal or client
+  projection change; verify immediate operator decision submission without
+  waiting for a periodic `GetInteraction` refetch.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

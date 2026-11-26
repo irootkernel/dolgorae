@@ -46,14 +46,13 @@ TASK-067 is COMPLETE; TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
 TASK-084 through TASK-087, TASK-093, and TASK-094 are COMPLETE;
 TASK-088 and TASK-089 are COMPLETE. EPIC-024 (TASK-095 through TASK-098) is
-COMPLETE in Dolgorae with superseding Gate C and Gate D acceptance on immutable
-H3 `3d3355e8481e` (commit `4d69005f`) paired with Gul H4 `9175b40a0097` /
-`03d62d5dd158` and Codex `0.172.0` recorded in
-[Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md)
-(retaining the separate Gul-repository 3-path H3 pin commit and Gul promoted H4
-manifest prerequisite before joint publication). EPIC-010 and EPIC-011 remain
-PLANNED. Pushes, tags, Releases, installation, and production cutover require
-separate authorization.
+COMPLETE with superseding Gate C and Gate D `RELEASE_READY_HANDOFF` provenance
+on immutable H3 `3d3355e8481e` (commit `4d69005f`) paired with Gul H4
+`9175b40a0097` / `03d62d5dd158` (committed Gul pin `3e8b7ef3`, promoted Gul
+manifest `a3e96ad7`) and Codex `0.172.0` recorded in
+[Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md).
+EPIC-010 and EPIC-011 remain PLANNED. Pushes, tags, Releases, installation, and
+production cutover require separate authorization.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
 Their shared execution context is the
@@ -151,8 +150,7 @@ unless this table is explicitly revised.
 EPIC-016 remains required for v0.1.3. The v0.1.4 sequence is EPIC-017,
 EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021, EPIC-022, and
 EPIC-024 (`COMPLETE` post-Gate-D runtime-upgrade resilience and superseding
-H3/H4 requalification in Dolgorae; separate Gul-repository pin commit and
-promoted H4 manifest remain pre-publication prerequisites).
+H3/H4 requalification with `RELEASE_READY_HANDOFF`).
 The new v0.1.4 work is a cumulative prerequisite of later release candidates;
 this adoption does not mark EPIC-010 or EPIC-011 complete or claim Personal
 Alpha readiness.
@@ -3253,9 +3251,9 @@ Outcome: Raised the Codex admission floor to `0.172.0` for fresh qualified creat
 
 Verification: Both repositories' complete gates passed exit 0 under standard `umask 0022` (Dolgorae `1,771` unit tests + int + e2e; Gul full `make test` on `08bd4f16` + 3-path H3 pin diff `af3895ac...`), `validate_frozen_h1.py`, `validate_current_v2_contract.py`, `make validate-agent-skills`, and `validate_markdown.py` passed, independent `R-D` (`18/18 MET`), `R-G` (`6/6 MET`), and selected technical review (`18/18 MET`, 0 blocking product defects) accepted the exact unchanged binaries with zero unqualified rebuilds, and promoted Gate C/D manifests verified cleanly.
 
-Handoff: Dolgorae-side Gate C and Gate D release handoff recorded in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md). Committing the 3-path H3 pin diff (`af3895ac...`) and publishing Gul's matching promoted H4 manifest inside the separate Gul repository (without rebuilding H4), as well as pushes, release QA, tags, GitHub Releases, installation, and production cutover, retain separate explicit authorization.
+Handoff: Complete `RELEASE_READY_HANDOFF` recorded in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md) binding committed Gul pin `3e8b7ef3` and promoted Gul H4 manifest `a3e96ad7` (`edca6f37`). Pushes, release QA, tags, GitHub Releases, installation, and production cutover retain separate explicit authorization.
 
-Epic acceptance: Complete in Dolgorae — all four Tasks (`TASK-095` through `TASK-098`) passed their completion gates; upgraded Codex and Claude runtimes operate across Gul sessions, Specialist workflows, and External Specialist MCP without compiled-in hash edits or idle manual server migrations; immutable Run bindings, single-writer safety, and H1/public-v2 wire contracts remain intact; historical `EPIC-022` provenance is preserved; and refreshed Gate C and Gate D acceptance is recorded for the superseding `v0.1.4` / Gul `v0.1.0` pair with the separate Gul-repository pin-commit/manifest prerequisite explicitly retained before publication.
+Epic acceptance: Complete — all four Tasks (`TASK-095` through `TASK-098`) passed their completion gates; upgraded Codex and Claude runtimes operate across Gul sessions, Specialist workflows, and External Specialist MCP without compiled-in hash edits or idle manual server migrations; immutable Run bindings, single-writer safety, and H1/public-v2 wire contracts remain intact; historical `EPIC-022` provenance is preserved; and refreshed Gate C and Gate D `RELEASE_READY_HANDOFF` acceptance is recorded across both Dolgorae and Gul for the superseding `v0.1.4` / Gul `v0.1.0` pair.
 
 ## EPIC-010: Operator and Audit Interfaces
 

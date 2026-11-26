@@ -21,10 +21,15 @@
     "target_release_matches_candidate": true
   },
   "gul_h4": {
-    "git_base": "08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1",
+    "committed_pin_commit": "3e8b7ef3f3840b82b9e63260a2940d75806ccd20",
+    "evidence_commit": "edca6f37a575526003035bb98277ce08f6208a60",
+    "embedded_package_source_base": "08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1",
     "h3_repin_diff_sha256": "sha256:af3895ac91fd6e401f48aae7b1cbb80ce5d08910b309565dbee4b95cc87430e2",
-    "gul_repo_commit_pending_in_peer": true,
-    "preserved_gul_peer_head": "f0c6c625e93940dd11eb4c1867aebe543f458fd4",
+    "three_path_diff_equivalence_sha256": "sha256:af3895ac91fd6e401f48aae7b1cbb80ce5d08910b309565dbee4b95cc87430e2",
+    "promoted_evidence_package": {
+      "path": "gul:evidence/aquarium/E16-T16/external-handoff/9175b40a00971e34c6743de341ed7cda09d2913504ddd91c3f5986c8feaff582/manifest.json",
+      "sha256": "sha256:a3e96ad798e1a0c792d3aed07c4cb2c1281ab5ded773ff67e1a0cbfabf1095fd"
+    },
     "release_app_executable_sha256": "sha256:9175b40a00971e34c6743de341ed7cda09d2913504ddd91c3f5986c8feaff582",
     "release_info_plist_sha256": "sha256:c99a136b69400ad91e46357a2f23508ff887543794d8803aa282ef320cb5225d",
     "release_package_manifest_sha256": "sha256:f9a15b36d03480e7078a65a15ee537fc3ee075cea10974b2d1bc93a8d5bb15df",

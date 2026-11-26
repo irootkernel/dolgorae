@@ -19,11 +19,11 @@ subsequently adopted `EPIC-024` (`TASK-095` through `TASK-098`) into the
 unreleased `v0.1.4` boundary to remove remaining Codex/Claude runtime-upgrade
 fragility. All historical `EPIC-022` checksums and verdicts below remain
 authoritative historical provenance for `8fb6a3578ae3` / `b9d1750e9ec5`.
-`TASK-098` (`EPIC-024`) has now completed Dolgorae-side superseding Gate C and
-Gate D qualification on exact H3 `3d3355e8481e` paired with Gul H4
-`9175b40a0097` / `03d62d5dd158` and Codex `0.172.0` (`Claude 2.1.332` for
-external hosts), subject to the explicit Gul-repository pre-publication
-prerequisite recorded below.
+`TASK-098` (`EPIC-024`) has now completed superseding Gate C and Gate D
+qualification and release-ready handoff on exact H3 `3d3355e8481e` paired with
+Gul H4 `9175b40a0097` / `03d62d5dd158` (committed Gul pin `3e8b7ef3...` and
+promoted Gul evidence `edca6f37...`) and Codex `0.172.0` (`Claude 2.1.332` for
+external hosts).
 
 ## Superseding `EPIC-024` (`TASK-098`) Gate C and Gate D Acceptance
 
@@ -48,7 +48,7 @@ independent cross-verification:
 | Dolgorae H3 archive / manifest | `dolgorae-v0.1.4-h3-darwin-arm64.tar.gz` (87 members) / `manifest.json` | Archive `025e4756aea0fdfcb5378afbfefaaa9daeab81a37cacdbc2fe6c1138b1bcbc7d` / Manifest `f9ed771e6d7b423d1e145978186feb87099ee9edf999cba9d7f4aa3ee12887fa` |
 | Dolgorae H3 public-v2 descriptor | `dolgorae-public-v2.descriptor.pb` (65 methods, 68 codes, unchanged) | `c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5` |
 | Immutable H1 contract archive / lock | Git `0927cbf87b0a3ba37c8509016c99f14c3f9f3c29` (`validate_frozen_h1.py` exit 0, 295 members) | Lock `5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a` / Archive `9b8427b6958b6ef9323dfcea1a512ee3ba070a9e594076613abfc98849012e3c` |
-| Gul H4 source / 3-path pin diff | Base `08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1` + 3-path H3 pin diff (`contract/current-v2/pin.json`, `internal/gateway/development_candidate.go`, `test/native/live.py`) | Diff `af3895ac91fd6e401f48aae7b1cbb80ce5d08910b309565dbee4b95cc87430e2` / Contract lock `acd95a6f7aa236bd6425ed68afad5f6942dfbac51e7f5b60680e7cabcc047360` |
+| Gul H4 source / 3-path pin commit | Committed pin `3e8b7ef3f3840b82b9e63260a2940d75806ccd20` / evidence `edca6f37a575526003035bb98277ce08f6208a60` (embedded package source `08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1` + exact 3-path H3 pin diff `contract/current-v2/pin.json`, `internal/gateway/development_candidate.go`, `test/native/live.py`) | 3-path diff equivalence `af3895ac91fd6e401f48aae7b1cbb80ce5d08910b309565dbee4b95cc87430e2` / Contract lock `acd95a6f7aa236bd6425ed68afad5f6942dfbac51e7f5b60680e7cabcc047360` |
 | Gul H4 production executable | `Gul.app/Contents/MacOS/gul` (49,953,298 B) | `9175b40a00971e34c6743de341ed7cda09d2913504ddd91c3f5986c8feaff582` |
 | Gul H4 production metadata | `Gul.app/Contents/Info.plist` / `package-manifest.json` | `c99a136b69400ad91e46357a2f23508ff887543794d8803aa282ef320cb5225d` / `f9a15b36d03480e7078a65a15ee537fc3ee075cea10974b2d1bc93a8d5bb15df` |
 | Gul H4 candidate executable | `Gul Candidate.app/Contents/MacOS/gul` (49,953,298 B) | `03d62d5dd1581719ebc54aa8ebe44220c6e7c5e28809adff202e417b3b2ea074` |
@@ -68,11 +68,14 @@ independent cross-verification:
   [cross-verification.json](../../evidence/aquarium/EPIC-024/gate-c-qualification/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/cross-verification.json).
 - Gate D (`TASK-098`):
   [manifest.json](../../evidence/aquarium/EPIC-024/gate-d-handoff/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/manifest.json)
-  (`sha256:fe679e0291ba73cc21c248f5a6c485b72fe16ee03fac4a2e726cf4f6064eb0b2`),
+  (`sha256:c2e732d2b35440c0d469812b8a828ac6f5ec4fe3244ea6f7709fa79c67e6dfe8`),
   containing
   [provenance.json](../../evidence/aquarium/EPIC-024/gate-d-handoff/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/provenance.json)
   and
   [release-readiness.json](../../evidence/aquarium/EPIC-024/gate-d-handoff/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/release-readiness.json).
+- Upstream Gul Phase 4 H4 package (verified cross-repository, pin commit `3e8b7ef3...`, evidence commit `edca6f37...`):
+  `gul:evidence/aquarium/E16-T16/external-handoff/9175b40a00971e34c6743de341ed7cda09d2913504ddd91c3f5986c8feaff582/manifest.json`
+  (`sha256:a3e96ad798e1a0c792d3aed07c4cb2c1281ab5ded773ff67e1a0cbfabf1095fd`).
 
 ### Superseding Three-Consumer Qualification and Gate D Limits
 
@@ -82,10 +85,10 @@ Independent cross-verification (`R-D`: `18/18 MET`, `READY_FROM_R_D`; `R-G`: `6/
 - **`PW-01..06` (`PASS`, 6/6)**: Pinned Podway `0.2.15` (`dece7fec...`, `124` assets, `88` schemas, `DOLV3-001..009`) Direct lifecycle and reactivation, `0.2.16` `WORKSPACE_CONTRACT_MISMATCH` isolation, caller-scoped `Managed` (`0.172.0` fixture repin `d2c8b9f1...`) and `External` (`Claude 2.1.332`) cold post-refresh receipt preservation on packaged H3 (`3d3355e8...`), round/release accounting, and group/merge/synthesis provenance with negative group-as-Action refusal.
 - **`GU-01..06` (`PASS`, 6/6)**: Exact H3 (`3d3355e8...`) + H4 (`9175b40a...` / `03d62d5d...`) loopback HTTPS smoke on both channels; deterministic `release-lifecycle` (11 Responses, 1 MCP decision, 2 writes, 2 closures, 0 processes); 250-turn `release-history` (500 items, 50 forward items, 276,066-byte original `ec45a77f...`, 1 closure, 0 processes); historical `8fb6a357` -> `3d3355e8` in-place upgrades (`U1` quiescent rollover and `U2` live-member `PROFILE_SERVER_BUSY` refusal -> owner close -> non-interrupting Operator migration -> original Gul data reopened ready); `U3` digest-only `config.toml` (`compact_prompt` stored only as `sha256:3f89773e...`, 0 raw hits across 20 + 75 scanned outputs); bounded isolated real-account interactive approval run (`CAN_EDIT`, `gpt-6.2-sol`, `effort=low` vs `high` config default, command card relative cwd `.`, settled `GetInteraction` refetch at revision 19, single UI `ACCEPT_ONCE` HTTP 200, resolved Gul attempt matching Dolgorae audit receipt `{decision: accept_once, outcome: approval}`, exact 5-byte file `sha256:f2c82dec...`, Gul restart/reattach with zero host-path exposure, read-only follow-up with unchanged hash, normal UI Close to `RUN_LIFECYCLE_CLOSED`, Dolgorae `closed` / `writer: none` / `lane: absent`, 40-record audit chain `bf1b5cb5...`, 0 surviving processes); and both repositories' complete gates exiting 0 under standard `umask 0022` (Dolgorae `1,771` unit tests + int + e2e; Gul full `make test` on `08bd4f16` + `af3895ac...`). `GU-04` and `GU-06` retain scope-limited predecessor `8904e66c` 30-minute soak and v12/v13->v20 restore provenance (`b1cdf868...`) under Master's 2026-11-11 and 2026-11-17 amendments.
 
-Explicit limits and pre-publication prerequisites retained for release owners:
+Explicit limits retained for release owners (`RELEASE_READY_HANDOFF`):
 
-1. **Separate Gul-repository commit and promoted H4 manifest prerequisite**: Operational H4 (`9175b40a...` / `03d62d5d...`) was built and verified from Gul base `08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1` plus the 3-path H3 pin diff (`af3895ac...`), while the separate Gul repository remained clean at `f0c6c625` during Dolgorae closeout. Committing that 3-path diff and publishing Gul's matching promoted H4 manifest (`evidence/aquarium/E16-T16/external-handoff/9175b40a00971e34c6743de341ed7cda09d2913504ddd91c3f5986c8feaff582/manifest.json`) inside the Gul repository without rebuilding H4 must complete before joint `v0.1.4` / Gul `v0.1.0` publication.
-2. **Internal dry-run provisioning floor limit ([DF-053](../deferred-feedback/README.md#df-053-align-internal-dry-run-provisioning-checks-with-the-fresh-codex-admission-floor))**: Public-v2 `ProvisioningService.ValidateProvisioning` and all install, hire, spawn, assign, and `StartRun` admission paths enforce Codex `>=0.172.0` (`CAPABILITY_UNSUPPORTED`), while internal dry-run `delegation_service::validate_provisioning`, `specialist_facade` `"validate_provisioning"`, and `source_binding::prepare_provisioning` check `>=0.158.0`. There is zero install or execution safety bypass; this dry-run mismatch is deferred to `DF-053` rather than triggering an unqualified H3 rebuild.
+1. **Internal dry-run provisioning floor limit ([DF-053](../deferred-feedback/README.md#df-053-align-internal-dry-run-provisioning-checks-with-the-fresh-codex-admission-floor))**: Public-v2 `ProvisioningService.ValidateProvisioning` and all install, hire, spawn, assign, and `StartRun` admission paths enforce Codex `>=0.172.0` (`CAPABILITY_UNSUPPORTED`), while internal dry-run `delegation_service::validate_provisioning`, `specialist_facade` `"validate_provisioning"`, and `source_binding::prepare_provisioning` check `>=0.158.0`. There is zero install or execution safety bypass; this dry-run mismatch is deferred to `DF-053` rather than triggering an unqualified H3 rebuild.
+2. **Interaction revision double-bump UX race ([DF-054](../deferred-feedback/README.md#df-054-coalesce-approval-opened-journal-revision-bumps-to-remove-operator-refetch-race) / Gul `E16-FB-001`)**: `src/turn.rs:4792-4803` appends `ApprovalRequested` (rev 18) and `InteractionOpened` (rev 19) separately ~12 ms apart, so an immediate operator click before Gul's 5 s `GetInteraction` refetch settles rev 19 hits Gul's fail-closed `v2_interaction.go:446` `ErrConflict` pre-dispatch. Waiting for rev 19 succeeded HTTP 200 on first submission; coalescing the revision bump is deferred without rebuilding H3/H4.
 3. **Upgrade and historical provenance limits**: `U1` and `U2` executed zero post-migration user turns; `U1` attempts 1–2 observed `ListProfiles` unavailable with an unestablished cause before attempt 3 passed unmodified; and predecessor `bfac15c3` metadata carried a one-character `codex-exec-server` checksum mismatch (`...b4062...` vs local `0.172.0` `...b3062...`), so `EPIC-024` pins only the verified local `0.172.0` binaries.
 4. **Retained separate authorities**: Master's 2026-11-11 and 2026-11-17 suspended/amended checkpoints (performance benchmarks, physical devices, 24-hour/OS-sleep soak), no downgrade guarantee, and separate authorization for pushes, release QA, tags, GitHub Releases, installation, production cutover, Sorage transmission, and consumer default-backend activation remain unchanged.
 
