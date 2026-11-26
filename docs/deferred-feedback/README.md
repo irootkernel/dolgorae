@@ -649,6 +649,26 @@ expiry notification wiring changes.
   check. Verify each original receipt and confirm that refresh leaves the
   native store unchanged.
 
+## DF-053: Align internal dry-run provisioning checks with the fresh Codex admission floor
+
+- Owner: Delegation provisioning and specialist facade maintainers
+- Finding: `public-v2` `ProvisioningService.ValidateProvisioning`
+  (`src/gateway_v2.rs:779`) and every install, hire, spawn, assign, and
+  `StartRun` admission path enforce `caller_workspace_supported()` (Codex
+  `>=0.172.0`), while internal dry-run `delegation_service::validate_provisioning`,
+  `specialist_facade` `"validate_provisioning"`, and
+  `source_binding::prepare_provisioning` check `validate_for_recovery()`
+  (`>=0.158.0`). A `0.169.0..0.171.x` Profile therefore passes dry-run
+  validation before failing with `CAPABILITY_UNSUPPORTED` at
+  `install_provisioning`.
+- Reason for deferral: no install or execution safety boundary is bypassed, and
+  fixing this dry-run mismatch in `v0.1.4` would require rebuilding and
+  requalifying the immutable `EPIC-024` H3 binary (`3d3355e8481e`).
+- Revisit condition: the next post-`v0.1.4` provisioning or admission-floor
+  change; enforce `caller_workspace_supported()` on fresh dry-run
+  `validate_provisioning` and `prepare_provisioning` paths while keeping
+  `RetainedSnapshot::verify` on `validate_for_recovery()`.
+
 Record a future entry only with a concrete finding, owner, reason for deferral,
 and revisit condition. Promote epic-sized work to the
 [TODO owner](../todo/README.md) or adopt it in the canonical

@@ -2694,8 +2694,10 @@ historical records. New records use the stable digest. HostStore refresh and
 owner-scoped writers acquire `host.lock` before any preparation registry writer
 lock, and refresh publishes only `owner.json`. Both owner schema versions accept
 compatible `adapter_version` values within the same `adapter_id`.
-The planned `TASK-098` covers Gate C and Gate D requalification for the
-superseding `v0.1.4` H3/H4 pair.
+Completed `TASK-098` records the superseding Gate C and Gate D qualification
+and handoff provenance for immutable H3 `3d3355e8481e` and Gul H4
+`9175b40a0097` / `03d62d5dd158` in
+[Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md).
 
 ### Public managed task collection
 

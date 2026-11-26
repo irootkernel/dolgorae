@@ -1,0 +1,54 @@
+{
+  "schema": "dolgorae.gate-d-provenance/v1",
+  "work_unit": "TASK-098",
+  "gate": "Gate D",
+  "release_pair": {
+    "dolgorae_target_version": "v0.1.4",
+    "gul_target_version": "v0.1.0"
+  },
+  "unqualified_rebuilds": 0,
+  "supersedes_historical_gate_d": "evidence/aquarium/EPIC-022/gate-d-handoff/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/manifest.json",
+  "dolgorae_h3": {
+    "candidate_id": "dolgorae-gul-e16-h3-3d3355e8481e",
+    "git_commit": "4d69005fee698e96d2f5a879189d8f359ed24f2f",
+    "git_tree": "ebe6851efd705b77e191ebb0191a72ae3350ab6e",
+    "binary_sha256": "sha256:3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017",
+    "binary_size_bytes": 28097648,
+    "archive_sha256": "sha256:025e4756aea0fdfcb5378afbfefaaa9daeab81a37cacdbc2fe6c1138b1bcbc7d",
+    "archive_members": 87,
+    "package_manifest_sha256": "sha256:f9ed771e6d7b423d1e145978186feb87099ee9edf999cba9d7f4aa3ee12887fa",
+    "public_v2_descriptor_sha256": "sha256:c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5",
+    "target_release_matches_candidate": true
+  },
+  "gul_h4": {
+    "git_base": "08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1",
+    "h3_repin_diff_sha256": "sha256:af3895ac91fd6e401f48aae7b1cbb80ce5d08910b309565dbee4b95cc87430e2",
+    "gul_repo_commit_pending_in_peer": true,
+    "preserved_gul_peer_head": "f0c6c625e93940dd11eb4c1867aebe543f458fd4",
+    "release_app_executable_sha256": "sha256:9175b40a00971e34c6743de341ed7cda09d2913504ddd91c3f5986c8feaff582",
+    "release_info_plist_sha256": "sha256:c99a136b69400ad91e46357a2f23508ff887543794d8803aa282ef320cb5225d",
+    "release_package_manifest_sha256": "sha256:f9a15b36d03480e7078a65a15ee537fc3ee075cea10974b2d1bc93a8d5bb15df",
+    "candidate_app_executable_sha256": "sha256:03d62d5dd1581719ebc54aa8ebe44220c6e7c5e28809adff202e417b3b2ea074",
+    "candidate_info_plist_sha256": "sha256:23960846f73663b54ba4be47a9a189f005c17008c8bec4bddbe3acf08be3e268",
+    "candidate_package_manifest_sha256": "sha256:a4064ff357970b4454ed8e2b2d4ee8280955864590779355c17e3077876bd350",
+    "archive_sha256": "sha256:f9cfa01ad8755ac059bd20162f208d5ebdb48688afdd987dd5e40a3cb9a6e045",
+    "contract_lock_sha256": "sha256:acd95a6f7aa236bd6425ed68afad5f6942dfbac51e7f5b60680e7cabcc047360"
+  },
+  "immutable_h1": {
+    "git_commit": "0927cbf87b0a3ba37c8509016c99f14c3f9f3c29",
+    "lock_sha256": "sha256:5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a",
+    "archive_sha256": "sha256:9b8427b6958b6ef9323dfcea1a512ee3ba070a9e594076613abfc98849012e3c"
+  },
+  "pinned_runtimes": {
+    "codex_version": "0.172.0",
+    "codex_executable_sha256": "sha256:f30a99714dc984876864239ef60563949b1e21421a7c9180422f51fd39186bc6",
+    "codex_code_mode_host_sha256": "sha256:0694f0e5c606a0015786cb94fb527b9526b4d892574cf5ba0e6bc7618cbc0d9d",
+    "codex_exec_server_sha256": "sha256:5add3be98ac625b1a6a2b3062f058d17a13466abf12e5c8a74795764f337622e",
+    "claude_version": "2.1.332",
+    "claude_executable_sha256": "sha256:5b8214f8f082f3187420b27b4063b9b4f4d9412cd66ea436d6d1966ad582700f"
+  },
+  "linked_gate_c_manifest": {
+    "path": "evidence/aquarium/EPIC-024/gate-c-qualification/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/manifest.json",
+    "sha256": "sha256:2b5006459062568a7978a881e4ff8d66b16fb2846c1b380c5cf31f4c9b88a6dd"
+  }
+}

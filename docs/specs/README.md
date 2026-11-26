@@ -6539,11 +6539,11 @@ unqualified rebuild or packaging change follows acceptance; only existing
 explicitly permitted QA-neutral metadata exceptions apply. Substantive changes
 require evidence-impact assessment across all consumers and requalification.
 Defects require explicit corrective scheduling and block incomplete closeout.
-Master's adopted `EPIC-024` (`TASK-095` through `TASK-098`) extends the
-unreleased `v0.1.4` boundary and requires a superseding H3 candidate, affected
-Aquarium/Podway/Gul H4 requalification, and refreshed Gate C and Gate D
-acceptance (`TASK-098`) before either product publishes, while preserving
-completed `EPIC-022` records as historical provenance.
+Master's adopted `EPIC-024` (`TASK-095` through `TASK-098`) extended the
+unreleased `v0.1.4` boundary and recorded its superseding H3/H4 three-consumer
+requalification and refreshed Gate C and Gate D acceptance (`TASK-098`,
+[Gate C and Gate D acceptance](dolgorae-v014-gate-c-d-acceptance.md)) while
+preserving completed `EPIC-022` records as historical provenance.
 Release workflows, publication, installation and runtime authorization remain
 separate. Required external work must be resolved before Epic closeout; calling it
 optional or handoff-only does not satisfy acceptance.

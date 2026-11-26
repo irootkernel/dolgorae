@@ -1,0 +1,28 @@
+{
+  "schema": "aquarium.promoted-evidence/v1",
+  "work_unit": {
+    "kind": "task",
+    "id": "TASK-098"
+  },
+  "purpose": "gate-d-handoff",
+  "target": {
+    "git_head": "4d69005fee698e96d2f5a879189d8f359ed24f2f",
+    "capture_kind": "release-binary",
+    "content_sha256": "sha256:3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017"
+  },
+  "source": {
+    "tool": "dolgorae-epic024-gate-d-handoff"
+  },
+  "payloads": [
+    {
+      "path": "evidence/aquarium/EPIC-024/gate-d-handoff/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/provenance.json",
+      "media_type": "application/json",
+      "sha256": "sha256:057e2cee0919182c6f465cb0cdf9c9f06bbdff9daa21f883e30b655851409668"
+    },
+    {
+      "path": "evidence/aquarium/EPIC-024/gate-d-handoff/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/release-readiness.json",
+      "media_type": "application/json",
+      "sha256": "sha256:252b7e8808f6edb5de1dfc0deeb677458445636c42e38613b184d59a44862a3a"
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "schema": "dolgorae.gate-d-release-readiness/v1",
+  "work_unit": "TASK-098",
+  "gate": "Gate D",
+  "verdict": "DOLGORAE_RELEASE_HANDOFF_READY_PENDING_GUL_REPO_PIN_COMMIT",
+  "release_eligible_versions": {
+    "dolgorae": "v0.1.4",
+    "gul": "v0.1.0"
+  },
+  "milestones_satisfied": [
+    "MILESTONE-SR1",
+    "MILESTONE-IR1",
+    "MILESTONE-ES1",
+    "MILESTONE-BH1-P",
+    "MILESTONE-CW1",
+    "MILESTONE-BC1",
+    "MILESTONE-BH1"
+  ],
+  "repository_gates": {
+    "dolgorae_make_test": {
+      "passed": true,
+      "unit_tests": 1771,
+      "includes": [
+        "test-prepare",
+        "test-unit",
+        "test-int",
+        "test-e2e"
+      ],
+      "frozen_h1_validator_exit": 0,
+      "current_v2_validator_exit": 0,
+      "validate_agent_skills_exit": 0
+    },
+    "gul_make_test": {
+      "passed": true,
+      "source_base": "08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1",
+      "h3_repin_diff_sha256": "sha256:af3895ac91fd6e401f48aae7b1cbb80ce5d08910b309565dbee4b95cc87430e2",
+      "sot_and_contract_checks": true
+    },
+    "combined_gate_c": {
+      "passed": true,
+      "matrix_rows_passed": 18,
+      "matrix_rows_total": 18,
+      "accountless_native_lifecycle_pass": true,
+      "accountless_native_history_250_turns_pass": true,
+      "in_place_upgrades_u1_u2_pass": true,
+      "digest_only_config_u3_pass": true,
+      "bounded_isolated_real_account_approval_pass": true
+    }
+  },
+  "independent_reviews": {
+    "dolgorae_r_d": "READY_FROM_R_D (18/18 MET, 0 blocking findings)",
+    "gul_r_g": "ready_for_gate_c_d_consolidation (6/6 Gul rows MET, 0 blocking findings)",
+    "selected_technical_review": "PROCEED_FOR_DOLGORAE_PROMOTION_AND_DOC_CLOSEOUT (18/18 MET, 0 blocking product defects; F-2 cross-repo Gul commit/package prerequisite and F-4 dry-run limit carried explicitly)"
+  },
+  "known_limits": [
+    "No provider downgrade guarantee is added.",
+    "Separate Gul repository prerequisite (F-2): committing the 3-path H3 pin diff (af3895ac...) atop 08bd4f16 and publishing Gul's matching promoted H4 manifest (evidence/aquarium/E16-T16/external-handoff/9175b40a.../manifest.json) inside the Gul repository must complete without rebuilding H4 before joint v0.1.4 / Gul v0.1.0 publication.",
+    "Internal dry-run floor limit (F-4 / DF-053): internal delegation_service::validate_provisioning, specialist_facade validate_provisioning, and source_binding::prepare_provisioning check >=0.158.0 while public-v2 ValidateProvisioning and all install/hire/spawn/assign/StartRun admission paths enforce >=0.172.0 (zero safety bypass; no unqualified H3 rebuild).",
+    "U1 and U2 in-place upgrade checks executed zero post-migration user turns; U1 attempts 1-2 saw ListProfiles unavailable with unestablished cause before attempt 3 passed unmodified.",
+    "Predecessor bfac15c3 metadata recorded a divergent codex-exec-server digest (...b4062... vs local 0.172.0 ...b3062...); EPIC-024 pins only local 0.172.0 binaries and does not inherit bfac15c3 as same-image exec-server evidence.",
+    "Performance/latency benchmarks, load profiling, physical-device checks, and 24-hour/OS-sleep soak remain suspended/amended per Master's 2026-11-11 and 2026-11-17 directives."
+  ],
+  "retained_separate_authorities": [
+    "Gul repository commit of 3-path H3 repin (af3895ac...) and Gul promoted H4 manifest publication (without rebuilding H4)",
+    "git push, release tagging, release QA, and GitHub Release publication",
+    "host installation and production data cutover",
+    "external Sorage transmission",
+    "consumer default-backend activation (Aquarium/Podway)"
+  ]
+}

@@ -1,0 +1,179 @@
+{
+  "schema": "dolgorae.gate-c-cross-verification/v1",
+  "work_unit": "TASK-098",
+  "gate": "Gate C",
+  "verdict": "GATE_C_PASS",
+  "milestone_unlocked": "MILESTONE-BH1",
+  "verified_at": "2026-11-26T01:02:00Z",
+  "blocking_findings": 0,
+  "unqualified_rebuilds": 0,
+  "supersedes_historical_gate_c": "evidence/aquarium/EPIC-022/gate-c-qualification/8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c/manifest.json",
+  "verified_pair": {
+    "dolgorae_h3": {
+      "candidate_id": "dolgorae-gul-e16-h3-3d3355e8481e",
+      "git_commit": "4d69005fee698e96d2f5a879189d8f359ed24f2f",
+      "git_tree": "ebe6851efd705b77e191ebb0191a72ae3350ab6e",
+      "binary_sha256": "sha256:3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017",
+      "binary_size_bytes": 28097648,
+      "archive_sha256": "sha256:025e4756aea0fdfcb5378afbfefaaa9daeab81a37cacdbc2fe6c1138b1bcbc7d",
+      "archive_members": 87,
+      "package_manifest_sha256": "sha256:f9ed771e6d7b423d1e145978186feb87099ee9edf999cba9d7f4aa3ee12887fa",
+      "public_v2_descriptor_sha256": "sha256:c34b1da680ef7f8edfd8eb744047b0981311a4076b3c05c3d4adb4986565f8f5"
+    },
+    "gul_h4": {
+      "git_base": "08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1",
+      "h3_repin_diff_sha256": "sha256:af3895ac91fd6e401f48aae7b1cbb80ce5d08910b309565dbee4b95cc87430e2",
+      "h3_repin_paths": [
+        "contract/current-v2/pin.json",
+        "internal/gateway/development_candidate.go",
+        "test/native/live.py"
+      ],
+      "gul_repo_commit_pending_in_peer": true,
+      "preserved_gul_peer_head": "f0c6c625e93940dd11eb4c1867aebe543f458fd4",
+      "release_app_executable_sha256": "sha256:9175b40a00971e34c6743de341ed7cda09d2913504ddd91c3f5986c8feaff582",
+      "release_app_size_bytes": 49953298,
+      "release_info_plist_sha256": "sha256:c99a136b69400ad91e46357a2f23508ff887543794d8803aa282ef320cb5225d",
+      "release_package_manifest_sha256": "sha256:f9a15b36d03480e7078a65a15ee537fc3ee075cea10974b2d1bc93a8d5bb15df",
+      "candidate_app_executable_sha256": "sha256:03d62d5dd1581719ebc54aa8ebe44220c6e7c5e28809adff202e417b3b2ea074",
+      "candidate_app_size_bytes": 49953298,
+      "candidate_info_plist_sha256": "sha256:23960846f73663b54ba4be47a9a189f005c17008c8bec4bddbe3acf08be3e268",
+      "candidate_package_manifest_sha256": "sha256:a4064ff357970b4454ed8e2b2d4ee8280955864590779355c17e3077876bd350",
+      "archive_sha256": "sha256:f9cfa01ad8755ac059bd20162f208d5ebdb48688afdd987dd5e40a3cb9a6e045",
+      "archive_members": 8,
+      "contract_lock_sha256": "sha256:acd95a6f7aa236bd6425ed68afad5f6942dfbac51e7f5b60680e7cabcc047360",
+      "historical_soak_restore_manifest": "gul:evidence/aquarium/E16-T16/external-handoff/8904e66c1fb8178022d9970b0527b0e31f39b4eddffc2f829946cba0e50bcf2f/manifest.json",
+      "historical_soak_restore_manifest_sha256": "sha256:b1cdf86821dfef84ae9c3ca56119b9906687459d67117d3243abded254d6625d"
+    },
+    "immutable_h1": {
+      "git_commit": "0927cbf87b0a3ba37c8509016c99f14c3f9f3c29",
+      "lock_sha256": "sha256:5900393481ed200c6ef4eadab96b034d679f3e4cc6b0d42b764c4211c94a862a",
+      "archive_sha256": "sha256:9b8427b6958b6ef9323dfcea1a512ee3ba070a9e594076613abfc98849012e3c",
+      "selected_members": 295,
+      "frozen_validation_exit": 0
+    },
+    "pinned_runtimes": {
+      "codex_version": "0.172.0",
+      "codex_executable_sha256": "sha256:f30a99714dc984876864239ef60563949b1e21421a7c9180422f51fd39186bc6",
+      "codex_code_mode_host_sha256": "sha256:0694f0e5c606a0015786cb94fb527b9526b4d892574cf5ba0e6bc7618cbc0d9d",
+      "codex_exec_server_sha256": "sha256:5add3be98ac625b1a6a2b3062f058d17a13466abf12e5c8a74795764f337622e",
+      "codex_0_172_0_stable_schema_sha256": "sha256:528ceb68ddb9a86a33722583429125437d05b848c92e8e7385b1d08f89772b2b",
+      "codex_0_172_0_experimental_schema_sha256": "sha256:b701eab71549c1b944dd7968d6cbb0d4b2e8c60543bb12dd82c92c739c9e3875",
+      "claude_version": "2.1.332",
+      "claude_executable_sha256": "sha256:5b8214f8f082f3187420b27b4063b9b4f4d9412cd66ea436d6d1966ad582700f",
+      "podway_0_2_15_binary_sha256": "sha256:dece7fecd90eaf6130b330e2cb70e98532f3e6b73950227cc2ff935a8be8e5ae",
+      "podway_0_2_15_catalog_sha256": "sha256:768adc7f0ac6bf7bf973018fa66616bef3f449e0b942ccc76ba8db4666126a1d",
+      "aquarium_source_commit": "db132845624c24bb4d0a889503b35a2a59b2571d",
+      "aquarium_source_archive_sha256": "sha256:542a7836dee2d412b06f6c78e16712124cce8f89c14413d943c1bd3fab5454e9"
+    }
+  },
+  "independently_verified_runtime_campaigns": {
+    "accountless_native_release_lifecycle": {
+      "native_pass": true,
+      "driver_exit": 0,
+      "responses_requests": 11,
+      "mcp_decisions": 1,
+      "write_files": 2,
+      "public_runs_closed": 2,
+      "remaining_owned_processes": 0,
+      "driver_stdout_sha256": "sha256:ffae08a0c2a90c56bbdf467966c6cf4ca019ade8bf636ff1667da82f36a2f78f",
+      "approval_sha256": "sha256:144d03be93c232ac422f9de98ba4299b7b5739fe5255bee421d849d5e04be943"
+    },
+    "accountless_native_release_history": {
+      "native_pass": true,
+      "driver_exit": 0,
+      "responses_requests": 250,
+      "turns": 250,
+      "items": 500,
+      "forward_items": 50,
+      "original_bytes": 276066,
+      "original_sha256": "sha256:ec45a77f54bb6c18e913f76a90bbce28f0a4c2ef523045a7bbb012287ac72e74",
+      "public_runs_closed": 1,
+      "remaining_owned_processes": 0,
+      "driver_stdout_sha256": "sha256:9a1f17d12b3e388ecd9e518fa67878dbcb573dbe8f105f1d59a6ebd44dd4b1f9",
+      "approval_sha256": "sha256:d448f3486c7c3acc01ce0a1a610200c110685dcbe42add1e9ce84fb4e6c34383"
+    },
+    "in_place_upgrade_and_digest_only_config": {
+      "u1_quiescent_rollover_from_8fb6a357": {
+        "passed": true,
+        "migration_phase": "committed",
+        "old_h3_sha256": "sha256:8fb6a3578ae3719cf69acbb218d4ae2b1caff8fee60353846233aff79fbd532c",
+        "old_runtime_absent": true,
+        "gul_profile_ready": true,
+        "gul_runtime_version": "0.172.0",
+        "post_migration_turns": 0
+      },
+      "u2_live_gul_member_operator_migration_from_8fb6a357": {
+        "passed": true,
+        "live_automatic_refusal_code": "PROFILE_SERVER_BUSY",
+        "live_operator_refusal_code": "PROFILE_SERVER_BUSY",
+        "original_owner_closed": true,
+        "operator_migration_committed": true,
+        "old_runtime_absent": true,
+        "gul_reopened_original_data_ready": true,
+        "post_migration_turns": 0
+      },
+      "u3_digest_only_unclassified_config": {
+        "passed": true,
+        "stored_compact_prompt_sha256": "sha256:3f89773e02d9381e225f51cdd40844c9cc29338b463f29bf0744954f5a2c3c79",
+        "producer_outputs_scanned": 20,
+        "configured_outputs_scanned": 75,
+        "raw_secret_hits": 0,
+        "gul_profile_ready": true
+      }
+    },
+    "bounded_isolated_real_account_approval": {
+      "real_account_pass": true,
+      "real_account_approval_pass": true,
+      "sessions_created": 1,
+      "user_turns": 2,
+      "model": "gpt-6.2-sol",
+      "config_toml_default_effort": "high",
+      "effort": "low",
+      "approval_http_status": 200,
+      "ui_approval_decision": "ACCEPT_ONCE",
+      "sent_interaction_revision": 19,
+      "sent_run_revision": 19,
+      "provider_recorded_resolution": {
+        "decision": "accept_once",
+        "outcome": "approval"
+      },
+      "provider_has_resolution_receipt": true,
+      "approved_file_bytes": 5,
+      "approved_file_sha256": "sha256:f2c82decdd7181cf98945929a62598db7e6b477e11f6e0eb0ae97020eff151ad",
+      "gul_restart_and_reconnect_verified": true,
+      "followup_sha256_unchanged": true,
+      "normal_ui_close_verified": true,
+      "gul_sqlite_lifecycle": "RUN_LIFECYCLE_CLOSED",
+      "dolgorae_run_state": "closed",
+      "dolgorae_writer_authority": "none",
+      "dolgorae_server_lane": "absent",
+      "dolgorae_event_cursor": "40",
+      "audit_jsonl_records": 40,
+      "audit_jsonl_sha256": "sha256:bf1b5cb57f9827e98e4846d208093e3ba84b67bcf8776aec295550c237af4c61",
+      "live_automatic_retries": 0,
+      "surviving_owned_processes": 0
+    },
+    "aq_pw_test_harness_provenance": {
+      "unmodified_native_production_host_driver_sha256": "sha256:aa01717af7af50bae7b767660be6cf6c69ef007a4dd38702cacb3de9b4d9643b",
+      "current_host_pin_diff_sha256": "sha256:9731f51ba227a0c12861156abf81f663afa672080eb1889a89880ac0f6545ae7",
+      "fixture_only_drain_diff_sha256": "sha256:eb3c7773428e211674271058eda4a37c68d22ab848f15de94a73ac12f9beb5fe",
+      "fixture_only_drain_driver_sha256": "sha256:845b1c21368f3682c864a93364a90f9c843fbbee57c920d755519bad3272804c",
+      "fixture_only_attestation_repin_diff_sha256": "sha256:d2c8b9f1c6a99a19809b648a81bbe25c39f442ffe3bcd4abfad387ce2dd8c6ba",
+      "native_successor_fixture_driver_sha256": "sha256:ee150667df4d8bddc75ffa678a116953884437395cb672b0b3de955f157e7bd5",
+      "product_code_diff_relative_to_4d69005f": "none"
+    }
+  },
+  "initial_failure_reconciliation": [
+    "Initial Dolgorae and Gul full-gate failures were caused by environment umask 0077 (mode 0o600 vs 0o644 in Rust dispatch-index assertions and 0o700 vs 0o755 in Gul unsafe-directory negative tests); re-running under standard umask 0022 exited 0 with zero failures on identical source.",
+    "Initial Podway Managed failure (exit 101) was caused by stale hardcoded 0.164.0 attestation in examples/support/native_successor_pipeline.rs:352 rejected by the new 0.172.0 admission floor; repinning only that test line (d2c8b9f1...) passed cleanly.",
+    "Initial external campaign had 12/14 pass and 2 --assign failures; focused retry passed Claude consumer-rounds and fixture-only scheduler drain (eb3c7773...) passed Codex consumer-release.",
+    "Initial GU-05 approval attempt clicked ACCEPT_ONCE on SEQ 18 before OperatorCardView's 5s GetInteraction refetch settled SEQ 19, hitting Gul v2_interaction.go:446 stale-revision guard pre-dispatch; waiting for settled refetch passed HTTP 200 on first submission."
+  ],
+  "operational_notes_and_limits": [
+    "Separate Gul repository pre-publication prerequisite (F-2): operational H4 (9175b40a... / 03d62d5d...) was built and qualified from Gul commit 08bd4f161a50ef9fdc25ea475abe3c30fc0ff8c1 plus the 3-path H3 pin diff (af3895ac...); committing that 3-path diff and publishing Gul's matching promoted H4 manifest inside the Gul repository must complete without rebuilding H4 before Gul v0.1.0 publication.",
+    "Internal dry-run floor limit (F-4 / DF-053): public-v2 ProvisioningService.ValidateProvisioning and all install/hire/spawn/assign/StartRun admission paths enforce Codex >=0.172.0, while internal dry-run delegation_service::validate_provisioning, specialist_facade validate_provisioning, and source_binding::prepare_provisioning check >=0.158.0 (zero install/execution bypass; tracked in docs/deferred-feedback/README.md#df-053 without rebuilding H3).",
+    "U1 and U2 verified in-place rollover and live-member operator migration with zero post-migration user turns; U1 attempts 1-2 saw ListProfiles unavailable with unestablished cause before attempt 3 passed unmodified.",
+    "Predecessor bfac15c3 metadata recorded a codex-exec-server digest differing by one character (...b4062... vs local installed 0.172.0 ...b3062...); EPIC-024 evidence pins only the verified local 0.172.0 binaries and does not inherit bfac15c3 as same-image exec-server evidence.",
+    "Performance/latency benchmarks, load profiling, physical-device campaigns, and 24-hour/OS-sleep soak remain suspended/amended per Master's 2026-11-11 and 2026-11-17 directives."
+  ]
+}

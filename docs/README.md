@@ -32,8 +32,10 @@ EPIC-020 resumes. These planning documents establish no
 implemented capabilities or runtime acceptance. The [Gate A acceptance](specs/dolgorae-v014-gate-a-acceptance.md) records the later
 independent H2 contract/foundation acceptance and preserves its runtime limits. The
 [Gate C and Gate D acceptance](specs/dolgorae-v014-gate-c-d-acceptance.md) records
-`EPIC-022` independent three-consumer qualification (`MILESTONE-BH1`), final
-H3/H4 provenance, and release-ready handoff limits without mutating frozen H1. The
+historical `EPIC-022` provenance (`8fb6a3578ae3` / `b9d1750e9ec5`) and superseding
+`EPIC-024` (`TASK-098`) independent three-consumer qualification (`MILESTONE-BH1`),
+H3/H4 provenance (`3d3355e8481e` / `9175b40a0097`), and release-handoff limits
+without mutating frozen H1. The
 [review-target strategy analysis](architecture-decision-records/review-strategy-analysis.md)
 is a supporting accepted design study, not runtime or completion evidence. The
 root [contribution guide](../CONTRIBUTING.md) is an entrypoint to implementation

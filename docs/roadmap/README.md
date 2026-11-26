@@ -45,9 +45,14 @@ acceptance before `v0.1.4` publication.
 TASK-067 is COMPLETE; TASK-068 through TASK-079 are COMPLETE;
 TASK-080 through TASK-083 and TASK-027 are COMPLETE;
 TASK-084 through TASK-087, TASK-093, and TASK-094 are COMPLETE;
-TASK-088 and TASK-089 are COMPLETE. EPIC-024 is ACTIVE. TASK-095 through
-TASK-097 are COMPLETE. TASK-098, EPIC-010, and EPIC-011 remain PLANNED.
-Commits, pushes, tags, Releases, installation, and production cutover require
+TASK-088 and TASK-089 are COMPLETE. EPIC-024 (TASK-095 through TASK-098) is
+COMPLETE in Dolgorae with superseding Gate C and Gate D acceptance on immutable
+H3 `3d3355e8481e` (commit `4d69005f`) paired with Gul H4 `9175b40a0097` /
+`03d62d5dd158` and Codex `0.172.0` recorded in
+[Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md)
+(retaining the separate Gul-repository 3-path H3 pin commit and Gul promoted H4
+manifest prerequisite before joint publication). EPIC-010 and EPIC-011 remain
+PLANNED. Pushes, tags, Releases, installation, and production cutover require
 separate authorization.
 TASK-027 retains its identity as EPIC-009's
 integrated collaboration acceptance after TASK-080 through TASK-083.
@@ -144,9 +149,10 @@ release, change the changelog, authorize a tag or publication, or prove an
 installed runtime. New Epics adopted later do not enter the `v0.2.0` boundary
 unless this table is explicitly revised.
 EPIC-016 remains required for v0.1.3. The v0.1.4 sequence is EPIC-017,
-EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021, and EPIC-022
-(completed), followed by EPIC-024 (`ACTIVE` post-Gate-D runtime-upgrade
-resilience and superseding H3/H4 requalification).
+EPIC-018, EPIC-019, EPIC-023, EPIC-020, EPIC-009, EPIC-021, EPIC-022, and
+EPIC-024 (`COMPLETE` post-Gate-D runtime-upgrade resilience and superseding
+H3/H4 requalification in Dolgorae; separate Gul-repository pin commit and
+promoted H4 manifest remain pre-publication prerequisites).
 The new v0.1.4 work is a cumulative prerequisite of later release candidates;
 this adoption does not mark EPIC-010 or EPIC-011 complete or claim Personal
 Alpha readiness.
@@ -3077,9 +3083,9 @@ Epic acceptance: Complete — all three consumers have mandatory accepted eviden
 
 ## EPIC-024: Runtime Upgrade Resilience and Setup-Bound Host Admission
 
-Status: `ACTIVE`
+Status: `COMPLETE`
 
-Detailed SOT: [Runtime upgrade resilience dossier](../todo/TODO-RUNTIME-UPGRADE-RESILIENCE.md)
+Canonical Outcomes: [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md), [ADR-043](../architecture-decision-records/README.md#adr-043-relax-additive-host-configuration-quiescent-upgrade-rollover-and-setup-bound-host-pins-for-runtime-upgrade-resilience), [Gate C promoted evidence](../../evidence/aquarium/EPIC-024/gate-c-qualification/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/manifest.json), and [Gate D promoted evidence](../../evidence/aquarium/EPIC-024/gate-d-handoff/3d3355e8481e08c014409b7369d0e730f885a1ee75abd96efa7e0f7e1fefd017/manifest.json)
 
 Goal: Remove brittle Codex and Claude upgrade blockers across local Profile
 configuration, idle shared Profile Server rollover, protocol subset/version
@@ -3239,47 +3245,17 @@ review.
 
 ### TASK-098: Superseding v0.1.4 H3 Candidate, Three-Consumer Requalification, and Refreshed Gate C/D Handoff
 
-Status: `PLANNED`
+Status: `COMPLETE`
 
 Depends on: `TASK-096` and `TASK-097`.
 
-Raise the Codex minimum to `0.172.0` for new qualified creation and
-caller-scoped host setup or refresh. Preserve retained execution and host
-records admitted at the former floor. Register exact `0.172.0` as Profile
-`COMPATIBLE` with both schema digests and version-specific runtime evidence.
-Qualify the resulting exact H3/H4 pair.
+Outcome: Raised the Codex admission floor to `0.172.0` for fresh qualified creation and caller-scoped host setup/refresh while preserving retained `0.169.x`–`0.171.x` Run and v2 host bindings, registered exact `0.172.0` as Profile `COMPATIBLE` with both schema bundle digests (`4d69005f`), packaged immutable H3 `3d3355e8481e` (`87` archive members, zero H1/public-v2 wire drift), qualified all 18 three-consumer rows (`AQ-01..06`, `PW-01..06`, `GU-01..06`) against upgraded Codex `0.172.0`, Claude `2.1.332`, pinned Podway `0.2.15`/`0.2.16`, and Gul H4 `9175b40a0097` / `03d62d5dd158` (including `release-lifecycle`, 250-turn `release-history`, `8fb6a357` -> `3d3355e8` quiescent and live-member upgrades, `U3` digest-only config, and Master-authorized bounded isolated real-account interactive UI `ACCEPT_ONCE` approval), published bounded Gate C and Gate D promoted evidence under `evidence/aquarium/EPIC-024/`, recorded [DF-053](../deferred-feedback/README.md#df-053-align-internal-dry-run-provisioning-checks-with-the-fresh-codex-admission-floor) for internal dry-run floor alignment without rebuilding H3, and retired the temporary `EPIC-024` dossier while preserving historical `EPIC-022` records.
 
-Package a superseding intended-version `v0.1.4` H3 Dolgorae candidate with zero
-wire drift against immutable `H1` (`0927cbf8...`) and
-`dolgorae-public-v2.descriptor.pb` (`c34b1da6...`) and isolated skill-package
-verification (`make validate-agent-skills`, without mutating host-installed
-skills). Assess impact and execute mandatory three-consumer requalification
-across Aquarium (`AQ-01..06`, including fresh upgraded external Codex/Claude MCP
-host and online refresh with open engagements), Podway (`PW-01..06`, including
-caller-scoped `Managed` adapter/receipt/refresh/recovery verification), and Gul
-(`GU-01..06`, including Gul H4 adoption of the superseding H3 binary,
-deterministic `release-lifecycle` and 250-turn `release-history`, in-place
-upgrade from historical H3 `8fb6a3578ae3` across both quiescent rollover and
-live-Gul-member operator-migration paths, digest-only unclassified `config.toml`
-checks, and separately authorized bounded isolated real-account verification).
-Complete independent cross-verification (`R-D` and `R-G`), publish bounded
-`aquarium.promoted-evidence/v1` Gate C and Gate D packages under
-`evidence/aquarium/EPIC-024/`, synchronize
-[Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md)
-and `CHANGELOG.md` while preserving historical `EPIC-022` records, and close out
-the Epic dossier.
+Verification: Both repositories' complete gates passed exit 0 under standard `umask 0022` (Dolgorae `1,771` unit tests + int + e2e; Gul full `make test` on `08bd4f16` + 3-path H3 pin diff `af3895ac...`), `validate_frozen_h1.py`, `validate_current_v2_contract.py`, `make validate-agent-skills`, and `validate_markdown.py` passed, independent `R-D` (`18/18 MET`), `R-G` (`6/6 MET`), and selected technical review (`18/18 MET`, 0 blocking product defects) accepted the exact unchanged binaries with zero unqualified rebuilds, and promoted Gate C/D manifests verified cleanly.
 
-Verification: both repositories' complete gates pass with zero unqualified
-rebuilds on the exact superseding H3/H4 artifacts, `validate_frozen_h1.py` and
-`validate_current_v2_contract.py` pass, all 18 consumer rows pass independent
-review, and promoted Gate C/D manifests verify cleanly.
+Handoff: Dolgorae-side Gate C and Gate D release handoff recorded in [Gate C and Gate D acceptance](../specs/dolgorae-v014-gate-c-d-acceptance.md). Committing the 3-path H3 pin diff (`af3895ac...`) and publishing Gul's matching promoted H4 manifest inside the separate Gul repository (without rebuilding H4), as well as pushes, release QA, tags, GitHub Releases, installation, and production cutover, retain separate explicit authorization.
 
-Epic acceptance: All four Tasks pass their completion gates; upgraded Codex and
-Claude installations operate across Gul sessions, Specialist workflows, and
-External Specialist MCP without compiled-in hash edits or idle manual server
-migrations; immutable Run bindings, single-writer safety, and H1/public-v2 wire
-contracts remain intact; and refreshed Gate C and Gate D acceptance is recorded
-for the superseding `v0.1.4` / Gul `v0.1.0` release pair.
+Epic acceptance: Complete in Dolgorae — all four Tasks (`TASK-095` through `TASK-098`) passed their completion gates; upgraded Codex and Claude runtimes operate across Gul sessions, Specialist workflows, and External Specialist MCP without compiled-in hash edits or idle manual server migrations; immutable Run bindings, single-writer safety, and H1/public-v2 wire contracts remain intact; historical `EPIC-022` provenance is preserved; and refreshed Gate C and Gate D acceptance is recorded for the superseding `v0.1.4` / Gul `v0.1.0` pair with the separate Gul-repository pin-commit/manifest prerequisite explicitly retained before publication.
 
 ## EPIC-010: Operator and Audit Interfaces
 
