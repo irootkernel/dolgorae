@@ -64,7 +64,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - Use `$aquarium:docs-setup` to audit, establish, adopt, or migrate canonical documentation structure and roadmap IDs.
 - Use `$aquarium:test-setup` to audit or configure the common Make or Bun testing contract and evidence-backed legacy waivers.
 - Use `$aquarium:release-handler` for one stable release lifecycle and `$aquarium:release-qa` for its exact committed-candidate scenario verification.
-- Use `$use-dolgorae` for explicitly requested Dolgorae workspace, global Profile, immutable-target, one-shot review, public-provider or Orchestrated Session operation, External Specialist Engagement, diagnosis, lifecycle, or recovery operations.
+- Use `$use-dolgorae` for explicitly requested Dolgorae workspace, session, role, daemon, MCP, diagnosis, lifecycle, or recovery operations.
 - Use `$use-mulgae` for an authorized Mulgae review, run inspection, finding follow-up, configuration diagnosis, cleanup plan, or recovery.
 - Use `$use-gaori` when a selected long or noisy check is routed through Gaori or existing Gaori evidence must be inspected.
 - Use `$use-gaori-status` for Gaori-calculated duration, outcome history, and detailed timing explanations.
@@ -81,19 +81,18 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 
 ### Repository Index and Authorities
 
-- Dolgorae is a local durable control layer for persistent Codex runs. The Rust implementation leaves conversation storage with Codex while owning stable run identity, controller authorization, workspace writer coordination, recovery, and auditability.
+- Dolgorae v2 is a local, multi-provider, durable agent actor control layer organized as an 8-crate Rust 2024 workspace (`dolgorae-spi`, `dolgorae-core`, `dolgorae-api`, `dolgorae-mcp`, `dolgorae-cli`, `driver-codex-app`, `driver-claude-wire`, `driver-agy-acp`). Native LLM conversation storage stays with the Tier-1 structured CLI runtimes while Dolgorae owns Roles, unified Session/Actor/Delegation/Mailbox state, monotonic cursors/revisions, approvals, and bounded artifacts.
 - `docs/specs/README.md` owns externally observable behavior and semantic requirements.
-- `docs/architecture/README.md` owns component boundaries, state ownership, process topology, and technical invariants.
+- `docs/architecture/README.md` owns component boundaries, state ownership, process topology, line budgets, and technical invariants.
 - `docs/architecture-decision-records/README.md` records accepted decisions, rationale, and rejected alternatives.
-- `docs/protocol/` owns checked wire, persisted-state, and machine-output shapes.
+- `docs/protocol/` owns checked OpenAPI, MCP, and Tier-1 driver protocol contracts.
 - `docs/roadmap/README.md` is the sole delivery-order and delivery-status authority.
-- Aquarium release notes: CHANGELOG.md
+- `docs/deferred-feedback/README.md` is the canonical deferred-feedback owner.
+- Aquarium release notes: `CHANGELOG.md`
 - If canonical documents disagree, resolve the contradiction before changing implementation. For behavior or architecture changes, update the owning document first, then synchronize affected protocol artifacts, implementation, tests, and roadmap entries.
-- The supported toolchain is Rust 1.97.1, Buf 1.69.0, Go 1.26.6, and Python 3 with the validation dependencies in `tools/validation/requirements.txt`.
-- The complete repository gate is `make PYTHON_BIN=.venv/bin/python test`. Its ordered layers are `test-prepare`, `test-unit`, `test-int`, and `test-e2e`.
-- `make test-prepare` runs `cargo fmt` and may rewrite Rust source. Use `make format-check` when a read-only formatting check is required.
-- `make test-live-specialist-review`, `make test-live-scoped-specialist-review`, `make test-live-access-safety`, `make test-live-codex-compatibility`, `make test-live-instruction-discovery`, `make test-live-workspace-startup`, and `make test-live-workspace-policy` contact an external Codex runtime and require explicit authorization plus their documented opt-in environment. They are not part of the default complete gate.
-- `make test-native-workspace-policy-fixture` starts the selected native Codex runtime with scripted loopback Responses and no account credentials. It requires explicit runtime authorization and its documented opt-in environment. The default gate runs only its offline fixture tests.
+- The supported toolchain is Rust 1.97.1 (edition 2024, `rustfmt`, `clippy`) and Python 3 (standard library only; no Buf, Go, or external Python virtual environment is required).
+- The complete repository gate is `make test`. Its ordered layers are `test-prepare`, `test-unit`, `test-int`, and `test-e2e`.
+- `make format-check` and `make test-prepare` run read-only `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `python3 tools/check_v2_guards.py`.
 
 ### Commit Messages
 
@@ -112,13 +111,11 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 
 ### Project-Specific Operating Rules
 
-- Keep `.sorage/` ignored and untracked. Mulgae uses Git ignore rules for workspace candidate selection and includes tracked files even when they match ignore patterns. It no longer processes `.mulgaeignore`; preserve existing user files. Ignore rules do not restrict provider reads.
-- Dolgorae no longer provides an aquarium-dev producer. Aquarium owns retirement of the shared manager, selectors, enrollment records, and development artifacts; do not edit its managed records by hand. Preserve the fixed per-user `~/.dolgorae` home and the authorization boundaries for workspace, Profile, server, and review operations.
-
-- Dolgorae agent guidance is source-distributed at `skills/use-dolgorae/SKILL.md` and installed through the README's Agent skill procedure. The skill's presence never authorizes initialization, external review, live account use, server control, credential mutation, cancellation, settlement, or repair.
-
+- Keep `.sorage/` ignored and untracked. Mulgae uses Git ignore rules for workspace candidate selection and includes tracked files even when they match ignore patterns. Preserve existing `.mulgaeignore` files. Ignore rules do not restrict provider reads.
+- Preserve the fixed per-user `~/.dolgorae` home and the authorization boundaries for daemon, workspace, role, session, and MCP operations.
+- Dolgorae agent guidance is source-distributed at `skills/use-dolgorae/SKILL.md`. The skill's presence never authorizes starting daemons, spawning external CLI sessions, live account use, credential mutation, cancellation, or repair.
 - Preserve the roadmap, Podway, Git, and external publication as separate authorities. A passing check or completed Podway session does not itself change roadmap status, create a commit, or prove publication.
 - Treat tracked `.podway/procedures/aquarium-*-v2.yaml` files as portable workflow definitions. Preserve `.podway/runtime/**`, existing sessions, and runtime identifiers as local state.
 - Do not commit virtual environments, caches, generated review material, local workflow state, credentials, or run and session identifiers.
-- Put product semantics and their tests in Rust. Keep Python limited to small independent repository checks and black-box executable tests.
-- E2E tests may use real Git only inside their isolated temporary home. Any future database or external service must use test-only credentials and namespaces and must never reuse production state or the user's real home.
+- Put product semantics and their tests in Rust. Keep Python limited to small independent stdlib repository guards and black-box executable checks.
+- E2E tests may use real Git only inside their isolated temporary home and must never reuse production state or the user's real `~/.dolgorae` home.

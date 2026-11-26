@@ -1,9 +1,0 @@
-{
-  "schema": "dolgorae-instruction-migration-result/v1",
-  "published_roles": [
-    "project-audit"
-  ],
-  "published_policy_count": 0,
-  "sources_retained": true,
-  "accepted_snapshots_changed": false
-}

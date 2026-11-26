@@ -1,0 +1,29 @@
+[package]
+name = "dolgorae-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "dolgorae"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true
+dolgorae-api.workspace = true
+dolgorae-core.workspace = true
+dolgorae-mcp.workspace = true
+dolgorae-spi.workspace = true
+driver-agy-acp.workspace = true
+driver-claude-wire.workspace = true
+driver-codex-app.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

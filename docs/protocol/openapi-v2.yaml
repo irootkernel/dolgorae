@@ -1,0 +1,920 @@
+openapi: 3.1.0
+info:
+  title: Dolgorae v2 Local Daemon API
+  version: 2.0.0-alpha.1
+  description: |
+    Local Unix domain socket HTTP/1.1 JSON + Server-Sent Events API served by
+    `dolgorae serve`. Every connection is authenticated via OS peer credentials
+    (`LOCAL_PEERCRED`). Scoped child-actor requests additionally carry
+    `Authorization: Bearer <DOLGORAE_ACTOR_TOKEN>`.
+servers:
+  - url: http://localhost
+    description: Transported over local Unix domain socket (~/.dolgorae/run/dolgorae.sock)
+
+paths:
+  /v2/health:
+    get:
+      operationId: getHealth
+      summary: Check daemon health and API version
+      responses:
+        "200":
+          description: Daemon healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version, api_version, pid]
+                properties:
+                  status: { type: string, const: ok }
+                  version: { type: string }
+                  api_version: { type: string, const: v2 }
+                  pid: { type: integer, minimum: 1 }
+
+  /v2/capabilities:
+    get:
+      operationId: getCapabilities
+      summary: Probe available drivers, models, and normative size bounds
+      responses:
+        "200":
+          description: Daemon and driver capabilities
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [api_version, bounds, drivers]
+                properties:
+                  api_version: { type: string, const: v2 }
+                  bounds: { $ref: "#/components/schemas/SizeBounds" }
+                  drivers:
+                    type: array
+                    items: { $ref: "#/components/schemas/DriverCapabilities" }
+
+  /v2/roles:
+    get:
+      operationId: listRoles
+      summary: List resolved Role / Persona definitions for a workspace
+      parameters:
+        - name: workspace
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Resolved role list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [roles]
+                properties:
+                  roles:
+                    type: array
+                    items: { $ref: "#/components/schemas/RoleSummary" }
+
+  /v2/roles/{name}:
+    get:
+      operationId: getRole
+      summary: Fetch one Role / Persona definition
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+        - name: workspace
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Role detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleDetail" }
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/sessions:
+    get:
+      operationId: listSessions
+      summary: List durable sessions and child actors
+      parameters:
+        - name: parent_session_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: root_session_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [active, idle, closed, failed] }
+      responses:
+        "200":
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions:
+                    type: array
+                    items: { $ref: "#/components/schemas/SessionSnapshot" }
+    post:
+      operationId: createSession
+      summary: Start a new root session or delegated child actor
+      description: |
+        Root sessions start at `depth = 0` with `SessionPolicy` (default
+        `max_delegation_depth = 3`, hard cap `8`; `allow_actor_collaboration = true`).
+        Delegated children compute `depth = parent.depth + 1` along `parent_session_id`
+        and fail with `409 Conflict` on `DELEGATION_DEPTH_EXCEEDED` or `DELEGATION_CYCLE`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSessionRequest" }
+      responses:
+        "201":
+          description: Session created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSnapshot" }
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Delegation depth exceeded (`DELEGATION_DEPTH_EXCEEDED`) or delegation cycle (`DELEGATION_CYCLE`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/sessions/{session_id}:
+    get:
+      operationId: getSession
+      summary: Get coherent session snapshot with revision stamp
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Current session snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSnapshot" }
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: closeSession
+      summary: Close a session and terminate its driver process
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Closed session snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSnapshot" }
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/sessions/{session_id}/resume:
+    post:
+      operationId: resumeSession
+      summary: Resume an idle or detached session, incrementing session_generation
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model: { type: [string, "null"] }
+                effort: { type: [string, "null"] }
+                access: { $ref: "#/components/schemas/AccessMode" }
+                approval_policy: { $ref: "#/components/schemas/ApprovalPolicy" }
+      responses:
+        "200":
+          description: Resumed session snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSnapshot" }
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/sessions/{session_id}/turns:
+    post:
+      operationId: submitTurn
+      summary: Submit a new turn to an active session
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmitTurnRequest" }
+      responses:
+        "202":
+          description: Turn accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_id, turn_id, revision, head_cursor]
+                properties:
+                  session_id: { type: string }
+                  turn_id: { type: string, minLength: 1 }
+                  revision: { type: integer, minimum: 0 }
+                  head_cursor: { $ref: "#/components/schemas/Cursor" }
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/sessions/{session_id}/turns/{turn_id}/interrupt:
+    post:
+      operationId: interruptTurn
+      summary: Request interruption of an in-flight turn
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: turn_id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        "202":
+          description: Interrupt requested
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_id, turn_id, status]
+                properties:
+                  session_id: { type: string }
+                  turn_id: { type: string }
+                  status: { type: string, const: interrupt_requested }
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/sessions/{session_id}/timeline:
+    get:
+      operationId: getTimeline
+      summary: Fetch bounded timeline page (<= 4 MiB) with distinct highest_cursor and next_page_token
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: page_token
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Bounded timeline page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TimelinePage" }
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/sessions/{session_id}/events:
+    get:
+      operationId: streamSessionEvents
+      summary: Stream session events over SSE with exclusive Last-Event-ID replay
+      description: |
+        Emits `text/event-stream`. Domain events carry `id: <cursor>` matching
+        their canonical decimal u64 cursor. Reconnecting with `Last-Event-ID`
+        (or `?after=<cursor>`) replays strictly greater cursors (`cursor > after`).
+        When requested history is expired or gapped, emits `event: refresh_required`
+        with a structured scope mask. Heartbeats emit `event: heartbeat` without
+        advancing the cursor.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { $ref: "#/components/schemas/Cursor" }
+        - name: after
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/Cursor" }
+      responses:
+        "200":
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/sessions/{session_id}/interactions:
+    get:
+      operationId: listInteractions
+      summary: List pending and recent interaction records for a session
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: pending_only
+          in: query
+          required: false
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Interaction list with current revision stamp
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_revision, interaction_revision, head_cursor, interactions]
+                properties:
+                  session_revision: { type: integer, minimum: 0 }
+                  interaction_revision: { type: integer, minimum: 0 }
+                  head_cursor: { $ref: "#/components/schemas/Cursor" }
+                  interactions:
+                    type: array
+                    items: { $ref: "#/components/schemas/InteractionRecord" }
+
+  /v2/sessions/{session_id}/interactions/{interaction_id}/answer:
+    post:
+      operationId: answerInteraction
+      summary: Answer a pending interaction with optimistic concurrency checks
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: interaction_id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnswerInteractionRequest" }
+      responses:
+        "200":
+          description: Interaction resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [interaction_id, status, session_revision, interaction_revision, head_cursor]
+                properties:
+                  interaction_id: { type: string }
+                  status: { type: string, const: resolved }
+                  session_revision: { type: integer, minimum: 0 }
+                  interaction_revision: { type: integer, minimum: 0 }
+                  head_cursor: { $ref: "#/components/schemas/Cursor" }
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Snapshot or revision mismatch (`SNAPSHOT_CONFLICT`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v2/sessions/{session_id}/mailbox:
+    get:
+      operationId: listMailboxMessages
+      summary: Read durable mailbox messages for a session/actor
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: after
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/Cursor" }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Ordered mailbox messages
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [highest_cursor, messages]
+                properties:
+                  highest_cursor: { $ref: "#/components/schemas/Cursor" }
+                  next_page_token: { type: [string, "null"] }
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/MailboxMessage" }
+    post:
+      operationId: postMailboxMessage
+      summary: Deliver a durable message to a session's mailbox
+      description: |
+        For scoped actor callers: parent <-> direct child delivery within the same
+        `root_session_id` delegation tree is always allowed; same-tree sibling/peer
+        delivery is allowed iff `SessionPolicy.allow_actor_collaboration == true`;
+        cross-tree or disallowed peer delivery is rejected with `403 Forbidden`
+        (`FORBIDDEN_SCOPE`). Bodies exceeding 256 KiB are stored as immutable artifacts.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                from_session_id: { type: [string, "null"] }
+                subject: { type: [string, "null"] }
+                body: { type: string }
+                artifact_ids:
+                  type: array
+                  items: { type: string }
+      responses:
+        "201":
+          description: Mailbox message persisted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailboxMessage" }
+        "403":
+          description: Cross-session or disallowed peer delivery (`FORBIDDEN_SCOPE`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/artifacts:
+    post:
+      operationId: createArtifact
+      summary: Store an immutable content-addressed artifact (<= 64 MiB)
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      parameters:
+        - name: media_type
+          in: query
+          required: false
+          schema: { type: string, default: application/octet-stream }
+      responses:
+        "201":
+          description: Artifact stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactRef" }
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v2/artifacts/{artifact_id}:
+    get:
+      operationId: getArtifact
+      summary: Fetch an immutable artifact or a bounded byte range of it
+      parameters:
+        - name: artifact_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: max_bytes
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 4194304, default: 262144 }
+      responses:
+        "200":
+          description: Bounded artifact slice
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+components:
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+
+  responses:
+    ErrorResponse:
+      description: Structured error envelope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    Cursor:
+      type: string
+      pattern: "^(0|[1-9][0-9]*)$"
+      description: Canonical unsigned 64-bit decimal ASCII cursor (no sign or leading zeros).
+
+    AccessMode:
+      type: string
+      enum: [read_only, workspace_write]
+
+    ApprovalPolicy:
+      type: string
+      enum: [interactive, auto_deny, auto_approve_scoped]
+
+    SessionPolicy:
+      type: object
+      required: [max_delegation_depth, allow_actor_collaboration]
+      properties:
+        max_delegation_depth:
+          type: integer
+          minimum: 0
+          maximum: 8
+          default: 3
+          description: Maximum delegation nesting depth (root = 0, child = parent.depth + 1).
+        allow_actor_collaboration:
+          type: boolean
+          default: true
+          description: Whether same-session sibling/peer actors may send mailbox messages to each other.
+
+    SizeBounds:
+      type: object
+      required: [max_inline_bytes, max_artifact_bytes, max_page_bytes, max_receive_bytes]
+      properties:
+        max_inline_bytes: { type: integer, const: 262144 }
+        max_artifact_bytes: { type: integer, const: 67108864 }
+        max_page_bytes: { type: integer, const: 4194304 }
+        max_receive_bytes: { type: integer, const: 8388608 }
+
+    ArtifactRef:
+      type: object
+      required: [artifact_id, sha256, media_type, byte_len]
+      properties:
+        artifact_id: { type: string }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        media_type: { type: string }
+        byte_len: { type: integer, minimum: 0, maximum: 67108864 }
+
+    DriverCapabilities:
+      type: object
+      required:
+        - driver_id
+        - available
+        - supports_effort
+        - supports_interactive_approval
+        - native_output_schema
+        - supports_mcp_injection
+        - supports_resume
+      properties:
+        driver_id: { type: string }
+        cli_version: { type: [string, "null"] }
+        available: { type: boolean }
+        unavailable_reason: { type: [string, "null"] }
+        models:
+          type: array
+          items:
+            type: object
+            required: [id, display_name, efforts]
+            properties:
+              id: { type: string }
+              display_name: { type: string }
+              efforts:
+                type: array
+                items: { type: string }
+        supports_effort: { type: boolean }
+        supports_interactive_approval: { type: boolean }
+        native_output_schema: { type: boolean }
+        supports_mcp_injection: { type: boolean }
+        supports_resume: { type: boolean }
+
+    RoleSummary:
+      type: object
+      required: [name, source, access, approval_policy]
+      properties:
+        name: { type: string }
+        source: { type: string, enum: [workspace, user_global] }
+        driver: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        effort: { type: [string, "null"] }
+        access: { $ref: "#/components/schemas/AccessMode" }
+        approval_policy: { $ref: "#/components/schemas/ApprovalPolicy" }
+
+    RoleDetail:
+      allOf:
+        - $ref: "#/components/schemas/RoleSummary"
+        - type: object
+          required: [instructions]
+          properties:
+            instructions: { type: string }
+            output_schema: { type: [object, "null"] }
+
+    CreateSessionRequest:
+      type: object
+      required: [workspace, driver]
+      properties:
+        workspace: { type: string }
+        driver: { type: string }
+        role: { type: [string, "null"] }
+        parent_session_id: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        effort: { type: [string, "null"] }
+        access: { $ref: "#/components/schemas/AccessMode" }
+        approval_policy: { $ref: "#/components/schemas/ApprovalPolicy" }
+        output_schema: { type: [object, "null"] }
+        allow_delegation: { type: boolean, default: false }
+        policy:
+          oneOf:
+            - $ref: "#/components/schemas/SessionPolicy"
+            - type: "null"
+
+    SessionSnapshot:
+      type: object
+      required:
+        - session_id
+        - root_session_id
+        - depth
+        - policy
+        - driver
+        - workspace
+        - status
+        - access
+        - approval_policy
+        - session_generation
+        - revision
+        - head_cursor
+        - interaction_revision
+      properties:
+        session_id: { type: string }
+        root_session_id: { type: string }
+        parent_session_id: { type: [string, "null"] }
+        depth: { type: integer, minimum: 0, maximum: 8 }
+        policy: { $ref: "#/components/schemas/SessionPolicy" }
+        role: { type: [string, "null"] }
+        driver: { type: string }
+        model: { type: [string, "null"] }
+        effort: { type: [string, "null"] }
+        workspace: { type: string }
+        status: { type: string, enum: [active, idle, closed, failed] }
+        access: { $ref: "#/components/schemas/AccessMode" }
+        approval_policy: { $ref: "#/components/schemas/ApprovalPolicy" }
+        session_generation: { type: integer, minimum: 1 }
+        revision: { type: integer, minimum: 0 }
+        head_cursor: { $ref: "#/components/schemas/Cursor" }
+        interaction_revision: { type: integer, minimum: 0 }
+        active_turn_id: { type: [string, "null"] }
+        pending_interaction_count: { type: integer, minimum: 0 }
+
+    SubmitTurnRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        effort: { type: [string, "null"] }
+        attachments:
+          type: array
+          items:
+            type: object
+            required: [path]
+            properties:
+              path: { type: string }
+              media_type: { type: [string, "null"] }
+        output_schema_override: { type: [object, "null"] }
+
+    TimelineItem:
+      type: object
+      required: [cursor, kind, created_at]
+      properties:
+        cursor: { $ref: "#/components/schemas/Cursor" }
+        turn_id: { type: [string, "null"] }
+        kind: { type: string }
+        created_at: { type: string, format: date-time }
+        inline_text: { type: [string, "null"] }
+        payload: { type: [object, "null"] }
+        artifact:
+          oneOf:
+            - $ref: "#/components/schemas/ArtifactRef"
+            - type: "null"
+
+    TimelinePage:
+      type: object
+      required: [session_id, revision, head_cursor, highest_cursor, items]
+      properties:
+        session_id: { type: string }
+        revision: { type: integer, minimum: 0 }
+        head_cursor: { $ref: "#/components/schemas/Cursor" }
+        highest_cursor: { $ref: "#/components/schemas/Cursor" }
+        next_page_token: { type: [string, "null"] }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/TimelineItem" }
+
+    DecisionOption:
+      type: object
+      required: [decision_id, label, kind]
+      properties:
+        decision_id: { type: string }
+        label: { type: string }
+        kind:
+          type: string
+          enum: [allow_once, allow_session, deny_once, deny_session, cancel, submit, unknown]
+
+    FileChangeEntry:
+      type: object
+      required: [path, kind]
+      properties:
+        path: { type: string }
+        move_path: { type: [string, "null"] }
+        kind: { type: string }
+        unified_diff: { type: [string, "null"] }
+
+    QuestionOption:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        description: { type: [string, "null"] }
+
+    UserQuestionItem:
+      type: object
+      required: [id, question]
+      properties:
+        id: { type: string }
+        header: { type: [string, "null"] }
+        question: { type: string }
+        options:
+          type: array
+          items: { $ref: "#/components/schemas/QuestionOption" }
+        allows_other: { type: boolean, default: false }
+        is_secret: { type: boolean, default: false }
+
+    CommandApprovalPayload:
+      type: object
+      required: [kind, command]
+      properties:
+        kind: { type: string, const: command_approval }
+        command:
+          type: array
+          items: { type: string }
+          description: Command argv vector.
+        cwd: { type: [string, "null"] }
+        reason: { type: [string, "null"] }
+
+    FileChangeApprovalPayload:
+      type: object
+      required: [kind, changes]
+      properties:
+        kind: { type: string, const: file_change_approval }
+        changes:
+          type: array
+          items: { $ref: "#/components/schemas/FileChangeEntry" }
+        reason: { type: [string, "null"] }
+
+    PermissionRequestPayload:
+      type: object
+      required: [kind, permissions]
+      properties:
+        kind: { type: string, const: permission_request }
+        permissions:
+          type: array
+          items: { type: string }
+        reason: { type: [string, "null"] }
+
+    UserQuestionPayload:
+      type: object
+      required: [kind, questions]
+      properties:
+        kind: { type: string, const: user_question }
+        questions:
+          type: array
+          items: { $ref: "#/components/schemas/UserQuestionItem" }
+
+    McpElicitationPayload:
+      type: object
+      required: [kind, server_name, message]
+      properties:
+        kind: { type: string, const: mcp_elicitation }
+        server_name: { type: string }
+        message: { type: string }
+        requested_schema: { type: [object, "null"] }
+
+    UnsupportedInteractionPayload:
+      type: object
+      required: [kind, original_kind, payload]
+      properties:
+        kind: { type: string, const: unsupported }
+        original_kind: { type: string }
+        reason: { type: [string, "null"] }
+        payload: {}
+
+    InteractionKind:
+      discriminator:
+        propertyName: kind
+      oneOf:
+        - $ref: "#/components/schemas/CommandApprovalPayload"
+        - $ref: "#/components/schemas/FileChangeApprovalPayload"
+        - $ref: "#/components/schemas/PermissionRequestPayload"
+        - $ref: "#/components/schemas/UserQuestionPayload"
+        - $ref: "#/components/schemas/McpElicitationPayload"
+        - $ref: "#/components/schemas/UnsupportedInteractionPayload"
+
+    InteractionRecord:
+      type: object
+      required:
+        - interaction_id
+        - turn_id
+        - session_generation
+        - interaction_revision
+        - session_revision
+        - kind
+        - original_kind
+        - title
+        - decisions
+        - protected
+        - status
+      properties:
+        interaction_id: { type: string }
+        turn_id: { type: string, minLength: 1 }
+        session_generation: { type: integer, minimum: 1 }
+        interaction_revision: { type: integer, minimum: 0 }
+        session_revision: { type: integer, minimum: 0 }
+        kind: { $ref: "#/components/schemas/InteractionKind" }
+        original_kind: { type: string }
+        title: { type: string }
+        decisions:
+          type: array
+          items: { $ref: "#/components/schemas/DecisionOption" }
+        protected: { type: boolean }
+        response_schema: { type: [object, "null"] }
+        max_response_bytes:
+          type: [integer, "null"]
+          minimum: 1
+          description: Optional byte cap for caller response; null means runtime default (256 KiB).
+        status: { type: string, enum: [pending, resolved, expired] }
+
+    AnswerInteractionRequest:
+      type: object
+      required:
+        - turn_id
+        - session_generation
+        - expected_interaction_revision
+        - expected_session_revision
+        - decision_id
+      properties:
+        turn_id: { type: string, minLength: 1 }
+        session_generation: { type: integer, minimum: 1 }
+        expected_interaction_revision: { type: integer, minimum: 0 }
+        expected_session_revision: { type: integer, minimum: 0 }
+        decision_id: { type: string }
+        answers:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+        payload: { type: [object, "null"] }
+
+    MailboxMessage:
+      type: object
+      required: [message_id, cursor, session_id, created_at]
+      properties:
+        message_id: { type: string }
+        cursor: { $ref: "#/components/schemas/Cursor" }
+        session_id: { type: string }
+        from_session_id: { type: [string, "null"] }
+        subject: { type: [string, "null"] }
+        inline_body: { type: [string, "null"] }
+        artifact:
+          oneOf:
+            - $ref: "#/components/schemas/ArtifactRef"
+            - type: "null"
+        created_at: { type: string, format: date-time }
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - BAD_REQUEST
+                - UNAUTHORIZED
+                - FORBIDDEN_SCOPE
+                - NOT_FOUND
+                - SNAPSHOT_CONFLICT
+                - DELEGATION_DEPTH_EXCEEDED
+                - DELEGATION_CYCLE
+                - PAYLOAD_TOO_LARGE
+                - DRIVER_UNAVAILABLE
+                - INTERNAL_ERROR
+            message: { type: string }
+            details: { type: [object, "null"] }

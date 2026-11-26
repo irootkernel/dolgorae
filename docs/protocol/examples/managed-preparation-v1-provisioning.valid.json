@@ -1,6 +1,0 @@
-{
-  "schema": "dolgorae.managed-preparation/v1",
-  "operation": "prepare_provisioning",
-  "role_ref": "reviewer",
-  "idempotency_key": "prep-prov-1"
-}

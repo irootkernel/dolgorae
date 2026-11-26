@@ -1,8 +1,0 @@
-{
-  "operation": "review_target",
-  "target": {
-    "kind": "range",
-    "revision": "main...feature"
-  },
-  "deadline_seconds": 600
-}

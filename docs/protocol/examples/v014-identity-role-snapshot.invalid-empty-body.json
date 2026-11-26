@@ -1,9 +1,0 @@
-{
-  "schema": "dolgorae.role-snapshot/v1",
-  "role_body": {
-    "byte_length": 0,
-    "sha256": "sha256:95d04f18cfa23937df28bf77bb1d9ba3f910783cf3f7477d2bb67e5011e8ae06"
-  },
-  "dependencies": [],
-  "selected_guidance": []
-}
