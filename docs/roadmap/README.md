@@ -17,7 +17,7 @@ Historical v0.1.4 delivery records remain on branch `legacy/v0.1.4` (`b083146`).
 
 | Task ID | Scope | Status |
 | --- | --- | --- |
-| `V2-GUL-01` | Migrate Gul consumer from `legacy/v0.1.4` gRPC to Dolgorae v2 UDS HTTP/1.1 JSON + SSE (`Cursor`/`Revision`, `highest_cursor`, `refresh_required`, `409` optimistic concurrency, generic interaction cards) | `PLANNED` |
+| `V2-GUL-01` | Migrate Gul consumer from `legacy/v0.1.4` gRPC to Dolgorae v2 UDS HTTP/1.1 JSON + SSE (`Cursor`/`Revision`, `highest_cursor`, `refresh_required`, `409` optimistic concurrency, generic interaction cards) | `COMPLETED` |
 
 > Note: Gul H4 stays pinned to `legacy/v0.1.4` until `V2-GUL-01` is completed and qualified.
 

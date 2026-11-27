@@ -88,7 +88,7 @@ This file is the canonical local agent guidance for the Dolgorae repository.
 - `docs/protocol/` owns checked OpenAPI, MCP, and Tier-1 driver protocol contracts.
 - `docs/roadmap/README.md` is the sole delivery-order and delivery-status authority.
 - `docs/deferred-feedback/README.md` is the canonical deferred-feedback owner.
-- Aquarium release notes: `CHANGELOG.md`
+- Aquarium release notes: CHANGELOG.md
 - If canonical documents disagree, resolve the contradiction before changing implementation. For behavior or architecture changes, update the owning document first, then synchronize affected protocol artifacts, implementation, tests, and roadmap entries.
 - The supported toolchain is Rust 1.97.1 (edition 2024, `rustfmt`, `clippy`) and Python 3 (standard library only; no Buf, Go, or external Python virtual environment is required).
 - The complete repository gate is `make test`. Its ordered layers are `test-prepare`, `test-unit`, `test-int`, and `test-e2e`.

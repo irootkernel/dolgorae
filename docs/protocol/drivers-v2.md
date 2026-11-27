@@ -11,7 +11,7 @@ all native ID and permission-grant mappings privately, and exposes only opaque
 - **Invocation**: `codex app-server --stdio`
 - **Framing gotcha**: Codex omits `"jsonrpc": "2.0"` on stdout responses and notifications (e.g., `{"id":1,"result":{...}}` and `{"method":"configWarning","params":...,"emittedAtMs":...}`). Parsers MUST NOT require a `"jsonrpc"` field.
 - **Handshake**:
-  1. Request `initialize`: `{"id":1,"method":"initialize","params":{"clientInfo":{"name":"dolgorae","version":"2.0.0-alpha.1"},"capabilities":{"experimentalApi":true}}}` -> `{userAgent, codexHome, platformFamily, platformOs}`.
+  1. Request `initialize`: `{"id":1,"method":"initialize","params":{"clientInfo":{"name":"dolgorae","version":"0.2.0"},"capabilities":{"experimentalApi":true}}}` -> `{userAgent, codexHome, platformFamily, platformOs}`.
   2. Notification `initialized`: `{"method":"initialized"}`.
 - **Session Lifecycle**:
   - `thread/start`: optional `model`, `cwd`, `sandbox` (`"read-only" | "workspace-write" | "danger-full-access"`), `approvalPolicy` (`"untrusted" | "on-request" | "never"` or `{"granular": {...}}`), `developerInstructions`, `baseInstructions`, `config`, `ephemeral`, `runtimeWorkspaceRoots`. Note: response `sandbox` uses camelCase `SandboxPolicy` (`{type: "readOnly" | "workspaceWrite" | "dangerFullAccess", ...}`).
