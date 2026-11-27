@@ -593,3 +593,210 @@ fn cli_version_flags_and_subcommand_emit_consistent_v_prefixed_version() {
     assert_eq!(payload["version"], json!(expected_version));
     assert_eq!(payload["api_version"], json!("v2"));
 }
+
+#[test]
+fn cli_artifact_read_raw_and_json_pagination_are_lossless() {
+    let home = TempDir::new("art-home");
+    let sock = home.path().join("run").join("dolgorae.sock");
+
+    let mut serve_cmd = Command::new(dolgorae_bin());
+    serve_cmd
+        .env("HOME", home.path())
+        .env("DOLGORAE_HOME", home.path())
+        .env("DOLGORAE_SOCKET", &sock)
+        .arg("--home")
+        .arg(home.path())
+        .arg("--socket")
+        .arg(&sock)
+        .arg("serve")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let daemon = ChildGuard::new(serve_cmd.spawn().expect("spawn dolgorae serve"));
+
+    let start = Instant::now();
+    while !sock.exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "daemon socket did not appear in time"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // Multi-byte UTF-8 payload intentionally without a trailing newline.
+    let original_str = "abc한글🐬dolgorae-끝-🌊-end";
+    let original_bytes = original_str.as_bytes().to_vec();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    let client = dolgorae_api::UdsClient::new(sock.clone());
+    let uploaded = rt
+        .block_on(client.post_artifact_bytes("text/plain; charset=utf-8", original_bytes.clone()))
+        .expect("upload utf-8 artifact");
+
+    // 1a. Non-JSON full read: exact raw bytes, no spurious trailing '\n', no U+FFFD.
+    let full_out = Command::new(dolgorae_bin())
+        .env("HOME", home.path())
+        .env("DOLGORAE_HOME", home.path())
+        .env("DOLGORAE_SOCKET", &sock)
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "--socket",
+            sock.to_str().unwrap(),
+            "artifact",
+            "read",
+            &uploaded.artifact_id,
+        ])
+        .output()
+        .expect("run raw full artifact read");
+    assert!(
+        full_out.status.success(),
+        "raw full read failed: stderr={}",
+        String::from_utf8_lossy(&full_out.stderr)
+    );
+    assert_eq!(full_out.stdout, original_bytes);
+    let full_reup = rt
+        .block_on(client.post_artifact_bytes("text/plain; charset=utf-8", full_out.stdout))
+        .expect("reupload raw full read");
+    assert_eq!(full_reup.sha256, uploaded.sha256);
+
+    // 1b. Non-JSON unaligned chunk reads (5 bytes cuts inside 3-byte '한' and 4-byte '🐬').
+    let mut raw_reconstructed = Vec::new();
+    let mut raw_offset = 0usize;
+    while raw_offset < original_bytes.len() {
+        let out = Command::new(dolgorae_bin())
+            .env("HOME", home.path())
+            .env("DOLGORAE_HOME", home.path())
+            .env("DOLGORAE_SOCKET", &sock)
+            .args([
+                "--home",
+                home.path().to_str().unwrap(),
+                "--socket",
+                sock.to_str().unwrap(),
+                "artifact",
+                "read",
+                &uploaded.artifact_id,
+                "--offset",
+                &raw_offset.to_string(),
+                "--max-bytes",
+                "5",
+            ])
+            .output()
+            .expect("run raw chunk artifact read");
+        assert!(
+            out.status.success(),
+            "raw chunk read failed at offset {raw_offset}: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.stdout.is_empty(),
+            "expected non-empty raw chunk at offset {raw_offset}"
+        );
+        assert!(
+            !out.stdout.windows(3).any(|w| w == [0xef, 0xbf, 0xbd]),
+            "raw stdout must not emit UTF-8 replacement bytes"
+        );
+        raw_offset += out.stdout.len();
+        raw_reconstructed.extend_from_slice(&out.stdout);
+    }
+    assert_eq!(raw_reconstructed, original_bytes);
+    let chunk_reup = rt
+        .block_on(client.post_artifact_bytes("text/plain; charset=utf-8", raw_reconstructed))
+        .expect("reupload raw chunked read");
+    assert_eq!(chunk_reup.sha256, uploaded.sha256);
+
+    // 2. `--json artifact read` with unaligned max_bytes=5 advances losslessly via next_offset
+    //    using UTF-8 boundary alignment until eof == true.
+    let mut json_reconstructed = String::new();
+    let mut next_offset = 0u64;
+    let mut page_count = 0usize;
+    loop {
+        let page = run_cli_json(
+            home.path(),
+            &sock,
+            &[],
+            &[
+                "artifact",
+                "read",
+                &uploaded.artifact_id,
+                "--offset",
+                &next_offset.to_string(),
+                "--max-bytes",
+                "5",
+            ],
+        );
+        page_count += 1;
+        assert!(page_count <= 32, "pagination failed to terminate");
+        assert_eq!(page["artifact_id"], json!(uploaded.artifact_id));
+        assert_eq!(page["offset"], json!(next_offset));
+        assert_eq!(
+            page["encoding"],
+            json!("utf-8"),
+            "expected UTF-8 aligned page at offset {next_offset}: {page}"
+        );
+        let content = page["content"].as_str().expect("string content");
+        let byte_len = page["byte_len"].as_u64().expect("byte_len");
+        assert_eq!(byte_len as usize, content.len());
+        assert_eq!(
+            page["next_offset"].as_u64().expect("next_offset"),
+            next_offset + byte_len
+        );
+        json_reconstructed.push_str(content);
+        next_offset = page["next_offset"].as_u64().unwrap();
+        if page["eof"].as_bool().expect("eof bool") {
+            break;
+        }
+        assert!(byte_len > 0, "non-EOF page must make forward progress");
+    }
+    assert!(page_count > 1, "expected multi-page JSON pagination");
+    assert_eq!(json_reconstructed, original_str);
+    let json_reup = rt
+        .block_on(
+            client
+                .post_artifact_bytes("text/plain; charset=utf-8", json_reconstructed.into_bytes()),
+        )
+        .expect("reupload json paginated read");
+    assert_eq!(json_reup.sha256, uploaded.sha256);
+
+    // 3. `--json artifact read` starting mid-codepoint (offset 4 lands on continuation byte of '한')
+    //    must fall back losslessly to `encoding == "hex"` matching the exact raw slice bytes.
+    let mid_offset = 4usize;
+    let mid_len = 5usize;
+    let mid_page = run_cli_json(
+        home.path(),
+        &sock,
+        &[],
+        &[
+            "artifact",
+            "read",
+            &uploaded.artifact_id,
+            "--offset",
+            &mid_offset.to_string(),
+            "--max-bytes",
+            &mid_len.to_string(),
+        ],
+    );
+    assert_eq!(mid_page["encoding"], json!("hex"));
+    assert_eq!(mid_page["offset"], json!(mid_offset));
+    assert_eq!(mid_page["byte_len"], json!(mid_len));
+    assert_eq!(mid_page["next_offset"], json!(mid_offset + mid_len));
+    assert_eq!(mid_page["eof"], json!(false));
+    let expected_hex: String = original_bytes[mid_offset..mid_offset + mid_len]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(mid_page["content"], json!(expected_hex));
+
+    let pid = daemon.id().to_string();
+    assert!(
+        Command::new("kill")
+            .arg("-TERM")
+            .arg(&pid)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(daemon.wait_exit(Duration::from_secs(5)).success());
+    assert!(!sock.exists());
+}

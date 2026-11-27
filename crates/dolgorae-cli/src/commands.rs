@@ -1,15 +1,16 @@
 //! CLI command execution helpers backing `dolgorae`.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dolgorae_api::{API_VERSION, BoundUdsServer, DaemonLock, ServerConfig, UdsClient, url_encode};
 use dolgorae_core::{
     AccessMode, AnswerInteractionRequest, ApprovalPolicy, CORE_VERSION, CapabilitiesSnapshot,
-    CoreConfig, CoreEngine, CreateSessionRequest, InteractionList, MailboxMessage, MailboxPage,
-    PostMailboxRequest, ResumeSessionRequest, RoleDetail, SessionPolicy, SessionSnapshot,
-    SubmitTurnRequest, TimelinePage, TurnAccepted, WaitMode, WaitSessionsRequest,
+    CoreConfig, CoreEngine, CreateSessionRequest, InteractionList, MAX_PAGE_BYTES, MailboxMessage,
+    MailboxPage, PostMailboxRequest, ResumeSessionRequest, RoleDetail, SessionPolicy,
+    SessionSnapshot, SubmitTurnRequest, TimelinePage, TurnAccepted, WaitMode, WaitSessionsRequest,
     WaitSessionsResponse, WriterLease,
 };
 use dolgorae_mcp::{McpMode, McpServer, McpServerConfig};
@@ -779,19 +780,88 @@ pub async fn run_artifact_read(
     offset: u64,
     max_bytes: usize,
 ) -> Result<(), String> {
-    let bytes = client
-        .get_artifact_slice(artifact_id, offset, max_bytes)
-        .await
-        .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if !json_mode {
+        let bytes = client
+            .get_artifact_slice(artifact_id, offset, max_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(&bytes)
+            .and_then(|()| stdout.flush())
+            .map_err(|e| format!("failed to write artifact bytes to stdout: {e}"))?;
+        return Ok(());
+    }
+
+    let (mut raw, mut eof) = if max_bytes < MAX_PAGE_BYTES {
+        let mut fetched = client
+            .get_artifact_slice(artifact_id, offset, max_bytes.saturating_add(1))
+            .await
+            .map_err(|e| e.to_string())?;
+        let eof = fetched.len() <= max_bytes;
+        if !eof {
+            fetched.truncate(max_bytes);
+        }
+        (fetched, eof)
+    } else if max_bytes == MAX_PAGE_BYTES {
+        let fetched = client
+            .get_artifact_slice(artifact_id, offset, max_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        let eof = if fetched.len() < max_bytes {
+            true
+        } else {
+            client
+                .get_artifact_slice(artifact_id, offset.saturating_add(fetched.len() as u64), 1)
+                .await
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        };
+        (fetched, eof)
+    } else {
+        let fetched = client
+            .get_artifact_slice(artifact_id, offset, max_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        let eof = fetched.len() < max_bytes;
+        (fetched, eof)
+    };
+
+    if !eof && let Err(err) = std::str::from_utf8(&raw) {
+        let valid_up_to = err.valid_up_to();
+        if valid_up_to > 0 && raw.len() - valid_up_to < 4 && err.error_len().is_none() {
+            raw.truncate(valid_up_to);
+            eof = false;
+        }
+    }
+
+    let byte_len = raw.len();
+    let next_offset = offset.saturating_add(byte_len as u64);
+    let (encoding, content) = match std::str::from_utf8(&raw) {
+        Ok(text) => ("utf-8", text.to_owned()),
+        Err(_) => ("hex", encode_hex(&raw)),
+    };
     let payload = json!({
         "artifact_id": artifact_id,
         "offset": offset,
-        "byte_len": bytes.len(),
-        "content": text,
+        "byte_len": byte_len,
+        "next_offset": next_offset,
+        "eof": eof,
+        "encoding": encoding,
+        "content": content,
     });
-    print_value(json_mode, &payload, || text.clone());
+    print_value(true, &payload, String::new);
     Ok(())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn format_session_human(snap: &SessionSnapshot) -> String {
