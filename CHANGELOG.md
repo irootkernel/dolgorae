@@ -18,9 +18,11 @@ development commits.
 - Provide dual-mode stdio MCP servers for external hosts and scoped child actors
   with depth/cycle isolation, hashed actor tokens, root-tree mailboxes, and `wait_sessions`.
 - Store large payloads in a streaming SHA-256 content-addressed artifact store
-  with `256 KiB` inline thresholds, `64 MiB` limits, and lossless UTF-8 pagination.
+  with `256 KiB` inline thresholds, `64 MiB` limits, and lossless UTF-8 MCP pagination.
 - Persist active sessions across `dolgorae serve` restarts by detaching running
   actors to resumable `idle` state and reattaching native CLI conversations on resume.
+- Coordinate concurrent workspace edits with optional single-writer leases
+  supporting atomic transfer and automatic release on close or shutdown.
 
 ### Changed
 
@@ -30,11 +32,15 @@ development commits.
   all Tier-1 drivers without passing secrets on subprocess command lines.
 - Simplify the build and verification toolchain to Rust 1.97.1 and Python 3
   standard library only (`make test`).
+- Rewrite the optional `use-dolgorae` skill and CLI surface for v2 (adding
+  `api_version` to `version --json`); reinstall the skill from v0.2.0 to update.
 
 ### Removed
 
 - Remove the v0.1 Codex-only gRPC public-v1 gateway, Protobuf/Buf generation
   pipeline, and Go consumer contract (archived on branch `legacy/v0.1.4`).
+- Remove v0.1 CLI subcommands (`workspace inspect`, `profile`, `run`, `review`,
+  `engagement`) and v0.1 state migration shims; pinned consumers stay on `legacy/v0.1.4`.
 
 ## v0.1.3 - 2026-10-01
 
