@@ -712,7 +712,7 @@ components:
 
     RoleSummary:
       type: object
-      required: [name, source, access, approval_policy]
+      required: [name, source, access, approval_policy, snapshot_sha256]
       properties:
         name: { type: string }
         source: { type: string, enum: [workspace, user_global] }
@@ -721,6 +721,7 @@ components:
         effort: { type: [string, "null"] }
         access: { $ref: "#/components/schemas/AccessMode" }
         approval_policy: { $ref: "#/components/schemas/ApprovalPolicy" }
+        snapshot_sha256: { type: string }
 
     RoleDetail:
       allOf:
@@ -733,10 +734,10 @@ components:
 
     CreateSessionRequest:
       type: object
-      required: [workspace, driver]
+      required: [workspace]
       properties:
         workspace: { type: string }
-        driver: { type: string }
+        driver: { type: [string, "null"] }
         role: { type: [string, "null"] }
         parent_session_id: { type: [string, "null"] }
         model: { type: [string, "null"] }
