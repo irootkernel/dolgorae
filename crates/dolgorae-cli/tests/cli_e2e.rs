@@ -543,3 +543,53 @@ fn cli_serve_duplicate_lock_headless_session_scoped_mcp_and_sigterm() {
     assert!(daemon2.wait_exit(Duration::from_secs(5)).success());
     assert!(!sock.exists());
 }
+
+#[test]
+fn cli_version_flags_and_subcommand_emit_consistent_v_prefixed_version() {
+    let expected_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let expected_human = format!("dolgorae {expected_version}\n");
+
+    for args in [&["--version"][..], &["-V"][..], &["version"][..]] {
+        let out = Command::new(dolgorae_bin())
+            .args(args)
+            .output()
+            .expect("run dolgorae version");
+        assert!(
+            out.status.success(),
+            "cli {args:?} failed ({:?}): stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected_human,
+            "unexpected stdout for {args:?}"
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "expected empty stderr for {args:?}, got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let out = Command::new(dolgorae_bin())
+        .args(["version", "--json"])
+        .output()
+        .expect("run dolgorae version --json");
+    assert!(
+        out.status.success(),
+        "cli version --json failed ({:?}): stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "expected empty stderr for version --json, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(&out.stdout).expect("version --json stdout valid JSON");
+    assert_eq!(payload["name"], json!("dolgorae"));
+    assert_eq!(payload["version"], json!(expected_version));
+    assert_eq!(payload["api_version"], json!("v2"));
+}

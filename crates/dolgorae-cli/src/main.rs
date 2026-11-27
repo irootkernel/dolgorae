@@ -7,16 +7,18 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use dolgorae_api::UdsClient;
-use dolgorae_core::{AccessMode, ApprovalPolicy, CORE_VERSION, WaitMode};
+use dolgorae_core::{AccessMode, ApprovalPolicy, WaitMode};
 use dolgorae_spi::AgentDriver;
 use driver_agy_acp::AgyAcpDriver;
 use driver_claude_wire::ClaudeWireDriver;
 use driver_codex_app::CodexAppDriver;
 
+const CLI_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
 #[derive(Debug, Parser)]
 #[command(
     name = "dolgorae",
-    version = CORE_VERSION,
+    version = CLI_VERSION,
     about = "Dolgorae v2 multi-provider actor control layer"
 )]
 struct Cli {
@@ -546,6 +548,8 @@ async fn dispatch(cli: Cli) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
+
     use super::*;
 
     #[test]
@@ -553,5 +557,15 @@ mod tests {
         let drivers = registered_drivers();
         let ids: Vec<&str> = drivers.iter().map(|d| d.driver_id()).collect();
         assert_eq!(ids, vec!["codex-app", "claude-wire", "agy-acp"]);
+    }
+
+    #[test]
+    fn cli_version_matches_v_prefixed_core_version() {
+        let expected_version = format!("v{}", dolgorae_core::CORE_VERSION);
+        assert_eq!(CLI_VERSION, expected_version);
+        assert_eq!(
+            Cli::command().render_version(),
+            format!("dolgorae {expected_version}\n")
+        );
     }
 }
